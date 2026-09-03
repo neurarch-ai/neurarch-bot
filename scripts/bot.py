@@ -1,5 +1,10 @@
-"""neurarch-bot driver: read `.neurarch.yml`, find the models this PR touches, trace HEAD and BASE,
-ask `/api/v1/plan` for each, and write one comment body plus the step outputs.
+"""neurarch-bot driver: read `.neurarch.yml`, trace the models, ask `/api/v1/plan` for each,
+and write one comment (or one issue) body plus the step outputs.
+
+Two modes over the same code path. `pr` finds the models this pull request touches, traces HEAD
+and BASE, and writes a comment that a blocker turns red. `report` traces every listed model at
+the current commit with no base, and writes the weekly issue body, which never fails the job.
+Both walk `process_model`, so the config parsing, the trace and the plan request are one path.
 
 Runs inside the composite action after torch and neurarch-trace are installed. Everything that
 leaves the machine goes through `plan_request.request_plan`; this file never reads a weight.
@@ -16,6 +21,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import plan_request  # noqa: E402
+import report  # noqa: E402
 
 __version__ = plan_request.__version__
 LINT_URL = "https://raw.githubusercontent.com/neurarch-ai/neurarch-lint/v1/lint.mjs"
@@ -313,9 +319,91 @@ def write_outputs(values: Dict[str, str]) -> None:
             print("output %s=%s" % (k, v if len(v) < 200 else v[:200] + "..."))
 
 
+def read_previous_report(path: Optional[str]) -> Optional[Dict[str, Any]]:
+    """Last week's numbers, parsed back out of the issue body this run is about to overwrite."""
+    if not path or not os.path.isfile(path):
+        log("no previous report on file; this is a first report.")
+        return None
+    with open(path, "r", encoding="utf-8") as f:
+        previous = report.parse_report_data(f.read())
+    if previous is None:
+        log("the previous report carries no machine-readable block; no week-over-week diff this time.")
+    else:
+        log("read %d model(s) from the previous report (%s)." % (
+            len(previous.get("models") or []), previous.get("generated")))
+    return previous
+
+
+def collect_drift(models: List[Dict[str, Any]], entries: List[Dict[str, Any]], workspace: str) -> List[Dict[str, Any]]:
+    """Parameter counts written next to each model that the trace disagrees with."""
+    drift: List[Dict[str, Any]] = []
+    for model, entry in zip(models, entries):
+        params = ((entry.get("plan") or {}).get("model") or {}).get("params")
+        others = [m for m in models if m["target"] != model["target"]]
+        found = report.doc_drift(model, params, workspace, other_models=others)
+        if found:
+            log("doc drift: %s says %s params, the trace says %s" % (
+                found["doc"], report.fmt_params(found["claimed"]), report.fmt_params(found["traced"])))
+            drift.append(found)
+    return drift
+
+
+def run_report(models: List[Dict[str, Any]], workspace: str, tmp: str, api_key: Optional[str],
+               config_path: str, run_url: Optional[str], base_outputs: Dict[str, str]) -> int:
+    """Report mode: every listed model at this commit, one issue body, no verdict on the job."""
+    previous = read_previous_report(os.environ.get("NEURARCH_PREVIOUS_REPORT"))
+    log("planning all %d listed model(s) at the current commit: no base, no diff against a branch."
+        % len(models))
+    entries = [process_model(m, workspace, None, tmp, None, api_key) for m in models]
+    drift = collect_drift(models, entries, workspace)
+
+    commit = os.environ.get("GITHUB_SHA")
+    body = report.assemble_report(
+        entries, __version__, previous=previous, drift=drift, commit=commit,
+        repo=os.environ.get("GITHUB_REPOSITORY"), run_url=run_url,
+        config_name=os.path.basename(config_path),
+        api_host=plan_request.api_host(plan_request.api_base()))
+    comment = report.change_comment(previous, entries, drift, commit=commit, run_url=run_url)
+
+    body_path = os.path.join(tmp, "neurarch-report-body.md")
+    comment_path = os.path.join(tmp, "neurarch-report-comment.md")
+    with open(body_path, "w", encoding="utf-8") as f:
+        f.write(body)
+    with open(comment_path, "w", encoding="utf-8") as f:
+        f.write(comment)
+    summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary_path:
+        with open(summary_path, "a", encoding="utf-8") as f:
+            f.write(body.replace(report.MARKER + "\n", "", 1))
+
+    blockers = sum(e["blockers"] for e in entries)
+    warnings = sum(e["warnings"] for e in entries)
+    out = dict(base_outputs)
+    out.update({
+        "legal": "true" if all(e["legal"] for e in entries) else "false",
+        "blockers": str(blockers),
+        "warnings": str(warnings),
+        "plans-json": json.dumps([summary_row(e) for e in entries], separators=(",", ":")),
+        "fail": "false",  # A report is a record, not a gate.
+        "comment": "none",
+        "affected": str(len(entries)),
+        "report": "ready",
+        "report-body-path": body_path,
+        "report-comment-path": comment_path,
+        "report-title": report.TITLE,
+    })
+    write_outputs(out)
+    log("report for %d model(s): %d blocker(s), %d warning(s), %d drift finding(s); the job stays green."
+        % (len(entries), blockers, warnings, len(drift)))
+    return 0
+
+
 def main() -> int:
     workspace = os.environ.get("GITHUB_WORKSPACE") or os.getcwd()
     tmp = os.environ.get("RUNNER_TEMP") or tempfile.gettempdir()
+    mode = (os.environ.get("INPUT_MODE") or "pr").strip().lower()
+    if mode not in ("pr", "report"):
+        raise SystemExit("neurarch-bot: `mode` must be `pr` or `report`, not `%s`" % mode)
     config_path = os.path.join(workspace, os.environ.get("INPUT_CONFIG") or ".neurarch.yml")
     api_key = (os.environ.get("INPUT_API_KEY") or "").strip() or None
     fail_on_warn = env_flag("INPUT_FAIL_ON_WARN")
@@ -337,7 +425,9 @@ def main() -> int:
                                              os.environ["GITHUB_RUN_ID"])
 
     base_outputs = {"legal": "true", "blockers": "0", "warnings": "0", "plans-json": "[]",
-                    "fail": "false", "comment": "none", "comment-path": comment_path, "affected": "0"}
+                    "fail": "false", "comment": "none", "comment-path": comment_path, "affected": "0",
+                    "report": "none", "report-body-path": "", "report-comment-path": "",
+                    "report-title": report.TITLE}
 
     config = load_config(config_path)
     if config is None:
@@ -358,6 +448,9 @@ depth (stop descending at this module depth), name.
         return 0
 
     models = parse_models(config)
+    if mode == "report":
+        return run_report(models, workspace, tmp, api_key, config_path, run_url, base_outputs)
+
     if not pr or not base_sha or not head_sha:
         log("not a pull_request event (no base/head sha); planning every listed model against no base.")
         changed = [m["file"] for m in models]

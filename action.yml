@@ -1,11 +1,15 @@
 name: 'neurarch-bot'
-description: 'The Neurarch agent for pull requests: every model change gets a plan (params, cost, GPU fit, will it run), and a blocker turns the check red.'
+description: 'The Neurarch agent for model repos: every model change gets a plan on the pull request (params, cost, GPU fit, will it run) and a blocker turns the check red, plus a weekly report issue on every model you own.'
 author: 'neurarch-ai'
 branding:
   icon: 'git-pull-request'
   color: 'purple'
 
 inputs:
+  mode:
+    description: '"pr" (default) plans the models a pull request touches and comments on it. "report" traces every model in the config at the current commit and upserts one issue titled "Neurarch weekly model report"; it never fails the job.'
+    required: false
+    default: 'pr'
   config:
     description: 'Path to the config listing the models to plan, relative to the repository root.'
     required: false
@@ -44,6 +48,12 @@ outputs:
   plans-json:
     description: 'JSON array, one row per affected model: target, input, status, legal, blockers, warnings, summary, params, cost, and the deltas when a base was traced.'
     value: ${{ steps.bot.outputs.plans-json }}
+  issue-number:
+    description: 'In report mode, the number of the weekly report issue that was created or updated.'
+    value: ${{ steps.report.outputs.issue-number }}
+  issue-url:
+    description: 'In report mode, the URL of the weekly report issue.'
+    value: ${{ steps.report.outputs.issue-url }}
 
 runs:
   using: 'composite'
@@ -69,21 +79,51 @@ runs:
         python -m pip install --quiet -r "${{ github.action_path }}/requirements.txt"
         python -m neurarch_trace --version
 
+    # Report mode diffs against the last report, so the numbers it compares against have to be
+    # read out of the issue before the body that carries them is overwritten.
+    - name: Find the previous weekly report
+      id: previous
+      if: inputs.mode == 'report'
+      uses: actions/github-script@v7
+      env:
+        PREVIOUS_PATH: ${{ runner.temp }}/neurarch-previous-report.md
+      with:
+        script: |
+          const fs = require('fs');
+          const title = 'Neurarch weekly model report';
+          const marker = '<!-- neurarch-report -->';
+          const { owner, repo } = context.repo;
+          const issues = await github.paginate(github.rest.issues.listForRepo, {
+            owner, repo, state: 'open', per_page: 100,
+          });
+          const matching = issues.filter(i => !i.pull_request && i.title === title);
+          const existing = matching.find(i => i.body && i.body.includes(marker)) || matching[0] || null;
+          if (!existing) {
+            core.info('neurarch-bot: no open weekly report issue yet; this run opens the first one.');
+            return;
+          }
+          fs.writeFileSync(process.env.PREVIOUS_PATH, existing.body || '');
+          core.setOutput('previous-path', process.env.PREVIOUS_PATH);
+          core.setOutput('issue-number', String(existing.number));
+          core.info(`neurarch-bot: previous report is issue #${existing.number}`);
+
     - name: Plan every affected model
       id: bot
       shell: bash
       env:
+        INPUT_MODE: ${{ inputs.mode }}
         INPUT_CONFIG: ${{ inputs.config }}
         INPUT_API_KEY: ${{ inputs.api-key }}
         INPUT_FAIL_ON_WARN: ${{ inputs.fail-on-warn }}
         INPUT_COMMENT_ON_CLEAN: ${{ inputs.comment-on-clean }}
+        NEURARCH_PREVIOUS_REPORT: ${{ steps.previous.outputs.previous-path }}
       run: |
         # Never exit non-zero here: a composite action stops at the first failing step, and the
         # comment must be posted before the verdict fails the job (see the last step).
         python "${{ github.action_path }}/scripts/bot.py" || echo "fail=true" >> "$GITHUB_OUTPUT"
 
     - name: Post or update the PR comment
-      if: github.event.pull_request.number && steps.bot.outputs.comment != 'none' && steps.bot.outputs.comment != ''
+      if: inputs.mode != 'report' && github.event.pull_request.number && steps.bot.outputs.comment != 'none' && steps.bot.outputs.comment != ''
       uses: actions/github-script@v7
       env:
         COMMENT_PATH: ${{ steps.bot.outputs.comment-path }}
@@ -110,6 +150,48 @@ runs:
             core.info('neurarch-bot: nothing to post (no existing comment, and nothing worth a new one)');
           }
 
+    - name: Upsert the weekly report issue
+      id: report
+      if: inputs.mode == 'report' && steps.bot.outputs.report == 'ready'
+      uses: actions/github-script@v7
+      env:
+        BODY_PATH: ${{ steps.bot.outputs.report-body-path }}
+        COMMENT_PATH: ${{ steps.bot.outputs.report-comment-path }}
+        ISSUE_TITLE: ${{ steps.bot.outputs.report-title }}
+        EXISTING: ${{ steps.previous.outputs.issue-number }}
+      with:
+        script: |
+          const fs = require('fs');
+          const { owner, repo } = context.repo;
+          const body = fs.readFileSync(process.env.BODY_PATH, 'utf8');
+          let number = Number(process.env.EXISTING || 0);
+          if (number) {
+            await github.rest.issues.update({ owner, repo, issue_number: number, body });
+            const note = fs.readFileSync(process.env.COMMENT_PATH, 'utf8');
+            await github.rest.issues.createComment({ owner, repo, issue_number: number, body: note });
+            core.info(`neurarch-bot: updated issue #${number} and commented on what changed`);
+          } else {
+            const created = await github.rest.issues.create({
+              owner, repo, title: process.env.ISSUE_TITLE, body,
+            });
+            number = created.data.number;
+            core.info(`neurarch-bot: opened issue #${number}`);
+            // The label is a nicety: a repository that does not have it, or a token that cannot
+            // write labels, must not turn a report into a failed run.
+            try {
+              await github.rest.issues.getLabel({ owner, repo, name: 'neurarch' });
+              await github.rest.issues.addLabels({ owner, repo, issue_number: number, labels: ['neurarch'] });
+            } catch (e) {
+              core.info(`neurarch-bot: no 'neurarch' label applied (${e.status || e.message})`);
+            }
+          }
+          const url = `https://github.com/${owner}/${repo}/issues/${number}`;
+          core.setOutput('issue-number', String(number));
+          core.setOutput('issue-url', url);
+          core.info(`neurarch-bot: ${url}`);
+
+    # Report mode pins `fail` to false: findings are a record, not a gate. This step still runs
+    # for a report that crashed outright, because a report that did not happen is a failure.
     - name: Fail on blockers
       if: steps.bot.outputs.fail == 'true'
       shell: bash
