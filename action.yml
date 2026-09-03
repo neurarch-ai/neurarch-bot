@@ -1,0 +1,118 @@
+name: 'neurarch-bot'
+description: 'The Neurarch agent for pull requests: every model change gets a plan (params, cost, GPU fit, will it run), and a blocker turns the check red.'
+author: 'neurarch-ai'
+branding:
+  icon: 'git-pull-request'
+  color: 'purple'
+
+inputs:
+  config:
+    description: 'Path to the config listing the models to plan, relative to the repository root.'
+    required: false
+    default: '.neurarch.yml'
+  api-key:
+    description: 'A Neurarch API key (nrk_...). Optional; keyless calls are rate-limited per hour and per IP.'
+    required: false
+    default: ''
+  fail-on-warn:
+    description: 'Set to "true" to fail the check on warnings, not just blockers.'
+    required: false
+    default: 'false'
+  comment-on-clean:
+    description: 'Set to "true" to post a comment even when the traced structure is identical to the base and has no findings. Default: stay silent on a refactor that leaves the graph unchanged (an existing comment is still updated).'
+    required: false
+    default: 'false'
+  python-version:
+    description: 'Python version used to import the model and run the trace.'
+    required: false
+    default: '3.11'
+  torch-index-url:
+    description: 'Wheel index for torch. The default is the CPU build, which is all a trace needs.'
+    required: false
+    default: 'https://download.pytorch.org/whl/cpu'
+
+outputs:
+  legal:
+    description: '"true" when every affected model will run (no blockers), else "false".'
+    value: ${{ steps.bot.outputs.legal }}
+  blockers:
+    description: 'Total blockers across affected models.'
+    value: ${{ steps.bot.outputs.blockers }}
+  warnings:
+    description: 'Total warnings across affected models.'
+    value: ${{ steps.bot.outputs.warnings }}
+  plans-json:
+    description: 'JSON array, one row per affected model: target, input, status, legal, blockers, warnings, summary, params, cost, and the deltas when a base was traced.'
+    value: ${{ steps.bot.outputs.plans-json }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Cache pip (torch CPU wheel)
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/pip
+        key: neurarch-bot-${{ runner.os }}-py${{ inputs.python-version }}-${{ hashFiles(format('{0}/requirements.txt', github.action_path)) }}-${{ inputs.torch-index-url }}
+        restore-keys: |
+          neurarch-bot-${{ runner.os }}-py${{ inputs.python-version }}-
+
+    - name: Install torch and neurarch-trace
+      shell: bash
+      run: |
+        python -m pip install --quiet --upgrade pip
+        python -m pip install --quiet torch --index-url "${{ inputs.torch-index-url }}"
+        python -m pip install --quiet -r "${{ github.action_path }}/requirements.txt"
+        python -m neurarch_trace --version
+
+    - name: Plan every affected model
+      id: bot
+      shell: bash
+      env:
+        INPUT_CONFIG: ${{ inputs.config }}
+        INPUT_API_KEY: ${{ inputs.api-key }}
+        INPUT_FAIL_ON_WARN: ${{ inputs.fail-on-warn }}
+        INPUT_COMMENT_ON_CLEAN: ${{ inputs.comment-on-clean }}
+      run: |
+        # Never exit non-zero here: a composite action stops at the first failing step, and the
+        # comment must be posted before the verdict fails the job (see the last step).
+        python "${{ github.action_path }}/scripts/bot.py" || echo "fail=true" >> "$GITHUB_OUTPUT"
+
+    - name: Post or update the PR comment
+      if: github.event.pull_request.number && steps.bot.outputs.comment != 'none' && steps.bot.outputs.comment != ''
+      uses: actions/github-script@v7
+      env:
+        COMMENT_PATH: ${{ steps.bot.outputs.comment-path }}
+        COMMENT_MODE: ${{ steps.bot.outputs.comment }}
+      with:
+        script: |
+          const fs = require('fs');
+          const marker = '<!-- neurarch-bot -->';
+          const body = fs.readFileSync(process.env.COMMENT_PATH, 'utf8');
+          const { owner, repo } = context.repo;
+          const issue_number = context.payload.pull_request.number;
+          const comments = await github.paginate(github.rest.issues.listComments, {
+            owner, repo, issue_number, per_page: 100,
+          });
+          const existing = comments.find(c =>
+            c.body && c.body.startsWith(marker) && c.user && c.user.type === 'Bot');
+          if (existing) {
+            await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            core.info(`neurarch-bot: updated comment ${existing.id}`);
+          } else if (process.env.COMMENT_MODE === 'create_or_update') {
+            const created = await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            core.info(`neurarch-bot: created comment ${created.data.id}`);
+          } else {
+            core.info('neurarch-bot: nothing to post (no existing comment, and nothing worth a new one)');
+          }
+
+    - name: Fail on blockers
+      if: steps.bot.outputs.fail == 'true'
+      shell: bash
+      run: |
+        echo "neurarch-bot: ${{ steps.bot.outputs.blockers }} blocker(s), ${{ steps.bot.outputs.warnings }} warning(s); failing the job."
+        exit 1

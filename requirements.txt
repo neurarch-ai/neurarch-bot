@@ -1,0 +1,2 @@
+neurarch-trace==0.1.3
+pyyaml>=6.0
