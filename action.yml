@@ -1,5 +1,5 @@
 name: 'neurarch-bot'
-description: 'The Neurarch agent for model repos: every model change gets a plan on the pull request (params, cost, GPU fit, will it run) and a blocker turns the check red, plus a weekly report issue on every model you own.'
+description: 'The Neurarch agent for model repos: every model change gets a plan on the pull request (params, cost, GPU fit, will it run) and a blocker turns the check red, a weekly report issue on every model you own, and `/neurarch train` in a comment runs one on a real GPU and posts the curve back.'
 author: 'neurarch-ai'
 branding:
   icon: 'git-pull-request'
@@ -7,7 +7,7 @@ branding:
 
 inputs:
   mode:
-    description: '"pr" (default) plans the models a pull request touches and comments on it. "report" traces every model in the config at the current commit and upserts one issue titled "Neurarch weekly model report"; it never fails the job.'
+    description: '"pr" (default) plans the models a pull request touches and comments on it. "report" traces every model in the config at the current commit and upserts one issue titled "Neurarch weekly model report"; it never fails the job. "train" answers a `/neurarch train` comment on a pull request by submitting one real GPU run and editing its own comment as the epochs arrive; it is selected automatically on an `issue_comment` event, and it never fails the job either.'
     required: false
     default: 'pr'
   config:
@@ -26,6 +26,10 @@ inputs:
     description: 'Token used to push the fix branch, open the fix pull request and add one line to the plan comment. The default GITHUB_TOKEN works, but a pull request it opens does NOT trigger workflows, so the fix PR gets no bot check of its own; pass a PAT to get one.'
     required: false
     default: ${{ github.token }}
+  timeout-min:
+    description: 'Train mode only. Minutes to keep polling the run and updating the comment. When it runs out the comment says the run is still going and how to poll it; the run itself is not cancelled and the job stays green.'
+    required: false
+    default: '20'
   fail-on-warn:
     description: 'Set to "true" to fail the check on warnings, not just blockers.'
     required: false
@@ -65,6 +69,12 @@ outputs:
   fix-pr-url:
     description: 'The URL of the fix pull request, when one was opened or updated.'
     value: ${{ steps.fix.outputs.fix-pr-url }}
+  job-id:
+    description: 'In train mode, the id of the training job that was submitted, or empty when nothing was.'
+    value: ${{ steps.bot.outputs.job-id }}
+  train-status:
+    description: 'In train mode: "none", one of the "refused-..." reasons, "timeout", or the terminal status of the run ("completed", "error", "cancelled").'
+    value: ${{ steps.bot.outputs.train-status }}
   issue-number:
     description: 'In report mode, the number of the weekly report issue that was created or updated.'
     value: ${{ steps.report.outputs.issue-number }}
@@ -136,6 +146,9 @@ runs:
           core.setOutput('issue-number', String(existing.number));
           core.info(`neurarch-bot: previous report is issue #${existing.number}`);
 
+    # Train mode posts and edits its own comment from inside this step: the run takes minutes
+    # and the comment has to follow it, which a github-script step that runs afterwards cannot
+    # do. It is the same step because the config parsing and the trace are the same code.
     - name: Plan every affected model
       id: bot
       shell: bash
@@ -145,6 +158,8 @@ runs:
         INPUT_API_KEY: ${{ inputs.api-key }}
         INPUT_FAIL_ON_WARN: ${{ inputs.fail-on-warn }}
         INPUT_COMMENT_ON_CLEAN: ${{ inputs.comment-on-clean }}
+        INPUT_GITHUB_TOKEN: ${{ inputs.github-token }}
+        INPUT_TIMEOUT_MIN: ${{ inputs.timeout-min }}
         NEURARCH_PREVIOUS_REPORT: ${{ steps.previous.outputs.previous-path }}
       run: |
         # Never exit non-zero here: a composite action stops at the first failing step, and the

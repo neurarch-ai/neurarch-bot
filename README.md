@@ -4,7 +4,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 [![Try Neurarch](https://img.shields.io/badge/Neurarch-try_it-7c3aed)](https://neurarch.com/bot)
 
-**Dependabot for models.** On every pull request that touches a model, neurarch-bot traces the model on your branch and on the base branch, and posts one comment saying what changed: params, cost, GPU fit, and whether the thing will run at all. A blocker turns the check red, so a model that cannot forward-pass never reaches a GPU. With `fix: true` it goes one step further and opens a pull request with the fix, but only one its own gate accepted: see [It opens the fix](#it-opens-the-fix). On a schedule, it keeps one issue up to date with every model you own: see [Weekly report](#weekly-report).
+**Dependabot for models.** On every pull request that touches a model, neurarch-bot traces the model on your branch and on the base branch, and posts one comment saying what changed: params, cost, GPU fit, and whether the thing will run at all. A blocker turns the check red, so a model that cannot forward-pass never reaches a GPU. With `fix: true` it goes one step further and opens a pull request with the fix, but only one its own gate accepted: see [It opens the fix](#it-opens-the-fix). Comment `/neurarch train` on the pull request and it runs the model on a real GPU and posts the curve back: see [`/neurarch train`](#neurarch-train). On a schedule, it keeps one issue up to date with every model you own: see [Weekly report](#weekly-report).
 
 It reads your model the way the runtime does, by importing it and tracing a forward pass, so the numbers are the real ones and not a guess made from the text of the file.
 
@@ -155,6 +155,116 @@ If you want the fix pull request to be checked like any other, pass a personal a
           github-token: ${{ secrets.NEURARCH_BOT_PAT }}
 ```
 
+## `/neurarch train`
+
+The plan says a model **will** run and what it **would** cost. Comment `/neurarch train` on the pull request and it runs, on a real GPU, and the bot edits one comment as the epochs arrive.
+
+Add the job to the same workflow. It needs `issue_comment` on the trigger list, and a checkout of the pull request's own head, which a comment event does not give you by default:
+
+```yaml
+name: Neurarch
+on:
+  pull_request:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  pull-requests: write     # the bot posts and edits its own comment
+
+jobs:
+  plan:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: neurarch-ai/neurarch-bot@v0
+        with:
+          api-key: ${{ secrets.NEURARCH_API_KEY }}
+
+  train:
+    if: github.event_name == 'issue_comment' && github.event.issue.pull_request != null && startsWith(github.event.comment.body, '/neurarch train')
+    runs-on: ubuntu-latest
+    steps:
+      # An issue_comment event checks out the default branch, which is not the model anyone
+      # asked about. This is the merge commit of the pull request the comment is on.
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/pull/${{ github.event.issue.number }}/merge
+      - uses: neurarch-ai/neurarch-bot@v0
+        with:
+          mode: train
+          api-key: ${{ secrets.NEURARCH_API_KEY }}
+```
+
+`mode: train` is selected automatically on an `issue_comment` event, so it can be left out; it is written above because a workflow that says what it does is easier to read than one that does not.
+
+### The arguments
+
+```
+/neurarch train
+/neurarch train epochs=3 dataset=mnist
+/neurarch train model=models/small_cnn.py:SmallCNN dataset=cifar10 gpu=T4 batch=128 lr=3e-4 optimizer=sgd
+```
+
+| Argument | Default | Notes |
+|---|---|---|
+| `model` | the only model in `.neurarch.yml` | `file.py:ClassOrFactory`, or just the class name. Required when the config lists more than one, because picking one for you would bill you for a model you did not ask about. |
+| `dataset` | `mnist` | `mnist`, `cifar10` or `tabular`. The rest need a signed upload URL, which a comment has no way to obtain. |
+| `epochs` | 3 | Clamped to 1..20 by the endpoint; the comment says so when it was. |
+| `batch` | 64 | Clamped to 8..512. |
+| `lr` | 0.001 | Clamped to 1e-5..1. |
+| `optimizer` | `adamw` | `adam`, `adamw` or `sgd`. |
+| `gpu` | the endpoint's choice | Any card your key is allowed to ask for. |
+
+Anything the parser does not recognise is **refused, not ignored**: `epoch=3` quietly training the default number of epochs is exactly the failure this rule exists to prevent.
+
+### The order it does things in, which is the point
+
+1. **Write access, or nothing.** A comment is something anyone with a GitHub account can leave, and the key belongs to whoever installed the Action. Only `OWNER`, `MEMBER` and `COLLABORATOR` can spend it; everyone else gets one sentence saying so, and nothing is submitted.
+2. **A key, or nothing.** There is no keyless training.
+3. **Your house rules, then the verifier.** `POST /api/v1/train` plans the graph on its own and never sees your `policy:` block, so the bot asks `/api/v1/plan` for the verdict first, for free, and submits only what your own rules allow. A `max_params` line that fails after the GPU is booked has saved nobody anything.
+4. **A blocked design is refused before anything is booked.** The comment carries the blockers and says, in those words, that nothing was submitted and nothing was spent. That refusal is the product working: generating an architecture is cheap, and training one that cannot forward-pass is not.
+5. **No GPU, no simulation.** If managed training is not configured for your key the endpoint answers 503 and the bot says so. It will never post a simulated curve into a pull request as a training result.
+6. **One comment, edited.** The comment is keyed on the job id (`<!-- neurarch-train:<job_id> -->`), so it is never confused with the plan comment and two runs on one pull request each keep their own. It is polled every 20 seconds up to `timeout-min`.
+7. **A failed run never fails the check.** The trainer's error is reported as what it is: a fact about the model, not a verdict on the pull request.
+
+### What the comment looks like
+
+> ## Neurarch training run
+>
+> **`models/small_cnn.py:SmallCNN` on `mnist`** - :white_check_mark: finished
+>
+> | | |
+> |---|---|
+> | Job | `job_1788488972586_eoblzo` |
+> | Config | 3 epochs, batch 64, lr 0.001, adamw |
+> | Plan estimate | $0.0075 (roofline, before the run) |
+> | Epochs | 3 |
+> | Wall clock | 34s |
+> | Cost | $0.0075 (measured from wall clock at this card's rate) |
+>
+> `val acc  ▁▆█`  98.65%
+> `val loss █▃▁`  0.0477
+>
+> | epoch | train loss | train acc | val loss | val acc |
+> |---:|---:|---:|---:|---:|
+> | 1 | 0.1904 | 94.10% | 0.0921 | 97.12% |
+> | 2 | 0.0651 | 97.99% | 0.0603 | 98.20% |
+> | 3 | 0.0456 | 98.58% | 0.0477 | 98.65% |
+>
+> **val acc 98.65%** · val loss 0.0477
+>
+> Written to the outcome ledger: the next `/api/v1/plan` for this structure will quote this run.
+
+The curve is a sparkline and a table rather than a picture on purpose. GitHub's comment sanitizer strips `src` from any `<img>` carrying a `data:` URI, in markdown and in raw HTML alike, and drops an inline `<svg>` entirely; this was measured against a real comment before the choice was made, not assumed.
+
+### It costs money
+
+Every accepted `/neurarch train` books a real GPU and bills the owner of the key in your repository secrets. A 3-epoch MNIST run is a few tenths of a cent; a long run on a big card is not. The write-access gate, the house-rules check and the endpoint's own refusal are all there because the cheapest run is the one that never started.
+
 ## Weekly report
 
 A pull request only ever shows you the model somebody touched. `mode: report` traces **every** model in `.neurarch.yml` at the current commit and keeps one issue up to date with what you own: what each model costs, whether it still runs, what moved since last week, and where the docs have drifted away from the code.
@@ -227,11 +337,12 @@ Four things worth knowing:
 
 | Input | Default | What it does |
 |---|---|---|
-| `mode` | `pr` | `pr` plans the models a pull request touches and comments on it. `report` traces every listed model and upserts the weekly issue. |
+| `mode` | `pr` | `pr` plans the models a pull request touches and comments on it. `report` traces every listed model and upserts the weekly issue. `train` answers a `/neurarch train` comment; selected automatically on an `issue_comment` event. |
 | `config` | `.neurarch.yml` | Path to the config listing the models, relative to the repository root. |
-| `api-key` | *(none)* | A Neurarch API key (`nrk_...`). Optional; keyless calls are rate-limited per hour and per IP. Also unlocks the server fix source, which is metered against the key owner's agent quota. |
+| `api-key` | *(none)* | A Neurarch API key (`nrk_...`). Optional for the plan; keyless calls are rate-limited per hour and per IP. Also unlocks the server fix source, which is metered against the key owner's agent quota. **Required for `train`**, which spends the key owner's GPU budget. |
 | `fix` | `false` | On a blocker, patch the model, re-trace, re-plan, and open a fix pull request if the new plan is legal and the parameter count is within 10 percent of the head. Needs `contents: write`. |
 | `github-token` | `${{ github.token }}` | Token used to push the fix branch, open the fix pull request and add one line to the plan comment. A pull request opened with the default token gets no workflow run; pass a PAT to get one. |
+| `timeout-min` | `20` | Train mode only. Minutes to keep polling the run and editing the comment. When it runs out the comment says the run is still going and how to poll it; the run is not cancelled and the job stays green. |
 | `fail-on-warn` | `false` | Fail the check on warnings, not just blockers. Ignored in report mode, which never fails on findings. |
 | `comment-on-clean` | `false` | Post a comment even when the traced structure is identical to the base and has no findings. An existing comment is updated either way. |
 | `python-version` | `3.11` | Python used to import the model and run the trace. |
@@ -248,12 +359,16 @@ Four things worth knowing:
 | `fix-status` | `none`, `not-fixed`, `opened`, `updated`, `push-failed` or `pr-failed`. |
 | `fix-pr-number` | The number of the fix pull request, when one was opened or updated. |
 | `fix-pr-url` | The URL of the fix pull request. |
+| `job-id` | In train mode, the id of the job submitted, or empty when nothing was. |
+| `train-status` | In train mode: `none`, a `refused-...` reason, `timeout`, or the run's terminal status (`completed`, `error`, `cancelled`). |
 | `issue-number` | In report mode, the number of the weekly report issue created or updated. |
 | `issue-url` | In report mode, the URL of that issue. |
 
 ## Privacy
 
 The traced graph leaves your repository: layer structure and shapes only, never weights and never data. Nothing is published unless you ask.
+
+`/neurarch train` sends the traced graph and the dataset name, and nothing else; the data is one of the three public datasets the endpoint offers and never comes from your repository.
 
 Your **source files** are uploaded only by the server fix source, and only when you set both `fix: true` and an `api-key`: `POST /api/v1/fix` receives the model files `.neurarch.yml` names, because a patch cannot be written against a file nobody has read. It stores nothing and runs nothing. The exact patch source reads your files on the runner and sends nothing anywhere. See [neurarch.com/bot](https://neurarch.com/bot).
 

@@ -1,13 +1,15 @@
-"""neurarch-bot driver: read `.neurarch.yml`, trace the models, ask `/api/v1/plan` for each,
-and write one comment (or one issue) body plus the step outputs.
+"""neurarch-bot driver: read `.neurarch.yml`, trace the models, ask the API about each, and
+write one comment (or one issue) body plus the step outputs.
 
-Two modes over the same code path. `pr` finds the models this pull request touches, traces HEAD
-and BASE, and writes a comment that a blocker turns red. `report` traces every listed model at
-the current commit with no base, and writes the weekly issue body, which never fails the job.
-Both walk `process_model`, so the config parsing, the trace and the plan request are one path.
+Three modes over one config-parse-and-trace path. `pr` finds the models this pull request
+touches, traces HEAD and BASE, and writes a comment that a blocker turns red. `report` traces
+every listed model at the current commit with no base, and writes the weekly issue body, which
+never fails the job. `train` answers a `/neurarch train` comment on a pull request: it traces
+the one model asked for and submits a real GPU run, then edits its own comment as the epochs
+arrive. `pr` and `report` walk `process_model`; `train` walks `run_train` and `scripts/train.py`.
 
 Runs inside the composite action after torch and neurarch-trace are installed. Everything that
-leaves the machine goes through `plan_request.request_plan`; this file never reads a weight.
+leaves the machine goes through `plan_request` or `train`; this file never reads a weight.
 """
 import json
 import os
@@ -23,6 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import fix as fixmod  # noqa: E402
 import plan_request  # noqa: E402
 import report  # noqa: E402
+import train as trainmod  # noqa: E402
 
 __version__ = plan_request.__version__
 LINT_URL = "https://raw.githubusercontent.com/neurarch-ai/neurarch-lint/v1/lint.mjs"
@@ -735,14 +738,251 @@ def post_fix_line(token: str, repo: str, pr: int, line: str) -> None:
         log("could not update the plan comment with the fix line: %s" % e)
 
 
+# ---------------------------------------------------------------- train stage
+
+
+def read_event() -> Dict[str, Any]:
+    path = os.environ.get("GITHUB_EVENT_PATH")
+    if not path or not os.path.isfile(path):
+        return {}
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def post_comment(token: str, repo: str, issue: int, body: str) -> Optional[int]:
+    try:
+        created = fixmod.gh_request("POST", "/repos/%s/issues/%d/comments" % (repo, issue),
+                                    token, {"body": body})
+    except fixmod.FixError as e:
+        log("could not post the comment: %s" % e)
+        return None
+    return int(created["id"]) if isinstance(created, dict) and created.get("id") else None
+
+
+def patch_comment(token: str, repo: str, comment_id: int, body: str) -> bool:
+    try:
+        fixmod.gh_request("PATCH", "/repos/%s/issues/comments/%d" % (repo, comment_id), token,
+                          {"body": body})
+    except fixmod.FixError as e:
+        log("could not update comment %s: %s" % (comment_id, e))
+        return False
+    return True
+
+
+def upsert_train_comment(token: str, repo: str, issue: int, marker: str,
+                         body: str) -> Optional[int]:
+    """Find this run's own comment by its job marker, or create it.
+
+    A re-run of the same job (a step that was retried, a workflow re-dispatched) edits the
+    comment already on the pull request rather than posting a second one.
+    """
+    try:
+        comments = fixmod.gh_request(
+            "GET", "/repos/%s/issues/%d/comments?per_page=100" % (repo, issue), token) or []
+    except fixmod.FixError as e:
+        log("could not list comments: %s" % e)
+        comments = []
+    existing = trainmod.find_comment(comments, marker)
+    if existing:
+        return int(existing["id"]) if patch_comment(token, repo, int(existing["id"]), body) else None
+    return post_comment(token, repo, issue, body)
+
+
+def run_train(workspace: str, tmp: str, api_key: Optional[str]) -> int:
+    """`/neurarch train` on a pull request comment: one real GPU run, or one reason there is not.
+
+    Never returns non-zero. A refusal is an answer and a failed training run is a fact about
+    the model, not a reason to turn someone's pull request check red.
+    """
+    host = plan_request.api_host(plan_request.api_base())
+    version = __version__
+    out = {"legal": "true", "blockers": "0", "warnings": "0", "plans-json": "[]", "fail": "false",
+           "comment": "none", "affected": "0", "report": "none", "job-id": "", "train-status": "none"}
+    event = read_event()
+    comment = event.get("comment") or {}
+    issue = event.get("issue") or {}
+    body = comment.get("body")
+    pr = issue.get("number")
+    token = (os.environ.get("INPUT_GITHUB_TOKEN") or "").strip()
+    repo = os.environ.get("GITHUB_REPOSITORY") or ""
+    run_url = None
+    if os.environ.get("GITHUB_SERVER_URL") and repo and os.environ.get("GITHUB_RUN_ID"):
+        run_url = "%s/%s/actions/runs/%s" % (os.environ["GITHUB_SERVER_URL"], repo,
+                                             os.environ["GITHUB_RUN_ID"])
+
+    if not trainmod.is_command(body):
+        log("this comment is not `%s`; nothing to do." % trainmod.COMMAND)
+        write_outputs(out)
+        return 0
+    if not issue.get("pull_request"):
+        log("`%s` only runs on a pull request comment; this is an issue." % trainmod.COMMAND)
+        write_outputs(out)
+        return 0
+    if not pr or not token or not repo:
+        log("train needs a pull request, a github-token and a repository; skipping.")
+        write_outputs(out)
+        return 0
+
+    def refuse(reason: str, status: str) -> int:
+        post_comment(token, repo, int(pr), trainmod.refusal_comment(reason, version, host, run_url))
+        log("refused: %s" % status)
+        out["train-status"] = status
+        write_outputs(out)
+        return 0
+
+    actor = (comment.get("user") or {}).get("login")
+    association = comment.get("author_association")
+    if not trainmod.may_spend(association):
+        # First, before anything is traced or asked: the key is not the commenter's to spend.
+        return refuse(trainmod.access_refusal(actor, association), "refused-access")
+    if not api_key:
+        return refuse(trainmod.no_key_refusal(), "refused-no-key")
+
+    args, arg_error = trainmod.parse_command(str(body))
+    if arg_error:
+        return refuse("**I could not read that command.** %s Nothing was submitted." % arg_error,
+                      "refused-arguments")
+
+    config_path = os.path.join(workspace, os.environ.get("INPUT_CONFIG") or ".neurarch.yml")
+    config = load_config(config_path)
+    if config is None:
+        return refuse("**No `%s` in this repository**, so there is nothing to train. Nothing was "
+                      "submitted." % os.path.basename(config_path), "refused-no-config")
+    models = parse_models(config)
+    model, choose_error = trainmod.choose_model(models, args.get("model"))
+    if choose_error:
+        return refuse("**%s** Nothing was submitted." % choose_error, "refused-model")
+
+    dataset = (args.get("dataset") or "mnist").lower()
+    train_config = trainmod.config_from_args(args)
+    gpu = args.get("gpu")
+    target = model["target"]
+    log("%s asked for %s on %s (%s)" % (actor, target, dataset,
+                                        json.dumps(train_config, sort_keys=True) or "defaults"))
+
+    out_dir = os.path.join(tmp, "neurarch-train", slug(target))
+    os.makedirs(out_dir, exist_ok=True)
+    graph_path = os.path.join(out_dir, "head.neurarch.json")
+    ok, msg = trace(model, workspace, graph_path)
+    if not ok:
+        return refuse("**Could not trace `%s` with input `%s`, so there is no graph to train.** "
+                      "Nothing was submitted.\n\n```\n%s\n```"
+                      % (target, model["input"], trainmod.trim_error(msg)), "refused-trace")
+    with open(graph_path, "r", encoding="utf-8") as f:
+        graph = json.load(f)
+
+    # The house rules first. `POST /api/v1/train` plans the graph on its own and never sees a
+    # policy, so a `max_params` line in `.neurarch.yml` would be discovered only after the GPU
+    # was booked. `/api/v1/plan` costs nothing and answers the same question.
+    policy = parse_policy(config, model)
+    if policy:
+        log("checking this repository's own policy before spending anything: %s"
+            % json.dumps(policy, sort_keys=True))
+        try:
+            planned = plan_request.request_plan(
+                graph, None, plan_request.build_source(target, model["input"], pr),
+                api_key=api_key, policy=policy)
+        except plan_request.PlanRequestError as e:
+            return refuse("**The policy check could not be run (%s), so nothing was submitted.** "
+                          "`.neurarch.yml` sets house rules for this model and the bot will not "
+                          "spend the key owner's GPU budget without checking them." % e,
+                          "refused-plan-failed")
+        if plan_request.has_blocker(planned["plan"]):
+            post_comment(token, repo, int(pr), trainmod.blocked_comment(
+                target, planned["plan"], planned.get("text", ""), version, host,
+                source="policy", run_url=run_url))
+            log("refused by this repository's own policy; nothing submitted.")
+            out["train-status"] = "refused-policy"
+            write_outputs(out)
+            return 0
+
+    source = trainmod.build_source(target, repo, pr, version)
+    try:
+        status, data, message = trainmod.submit_train(
+            graph, dataset, plan_request.api_base(), api_key, config=train_config, gpu=gpu,
+            source=source)
+    except trainmod.TrainRequestError as e:
+        return refuse("**`%s` could not reach the training endpoint: %s.** Nothing was submitted."
+                      % (trainmod.COMMAND, e), "refused-unreachable")
+
+    if status == 422 and data.get("error") == "blocked":
+        post_comment(token, repo, int(pr), trainmod.blocked_comment(
+            target, data.get("plan") or {}, data.get("text", ""), version, host,
+            source="server", run_url=run_url))
+        log("the endpoint refused the design; nothing was submitted and nothing was spent.")
+        out["train-status"] = "refused-blocked"
+        write_outputs(out)
+        return 0
+    if status == 503:
+        post_comment(token, repo, int(pr), trainmod.gpu_unconfigured_comment(
+            data.get("message") or message, version, host, run_url))
+        out["train-status"] = "refused-no-gpu"
+        write_outputs(out)
+        return 0
+    if status != 200 or not data.get("job_id"):
+        post_comment(token, repo, int(pr),
+                     trainmod.error_comment(status, message, version, host, run_url))
+        out["train-status"] = "refused-error"
+        write_outputs(out)
+        return 0
+
+    job_id = str(data["job_id"])
+    clamped = data.get("config") if isinstance(data.get("config"), dict) else {}
+    clamp_note = trainmod.clamp_note(train_config, clamped)
+    plan = data.get("plan") if isinstance(data.get("plan"), dict) else None
+    marker = trainmod.JOB_MARKER % job_id
+    log("submitted %s: job %s (%s)" % (target, job_id, json.dumps(clamped, sort_keys=True)))
+    out["job-id"] = job_id
+
+    def render(job: Optional[Dict[str, Any]], timed_out: bool = False) -> str:
+        return trainmod.run_comment(job_id, target, dataset, clamped or train_config, plan,
+                                    version, host, job=job, gpu=gpu, clamped=clamp_note,
+                                    timed_out=timed_out, run_url=run_url)
+
+    comment_id = upsert_train_comment(token, repo, int(pr), marker, render(None))
+
+    def on_change(job: Dict[str, Any]) -> None:
+        log("job %s: %s, %d epoch row(s)" % (job_id, job.get("status"), len(trainmod.epoch_rows(job))))
+        if comment_id:
+            patch_comment(token, repo, comment_id, render(job))
+
+    timeout_min = _timeout_min()
+    job, timed_out = trainmod.follow_job(job_id, plan_request.api_base(), api_key, on_change,
+                                         timeout_min=timeout_min)
+    if comment_id:
+        patch_comment(token, repo, comment_id, render(job, timed_out=timed_out))
+    status_name = "timeout" if timed_out else str((job or {}).get("status") or "unknown")
+    out["train-status"] = status_name
+    write_outputs(out)
+    log("job %s ended: %s" % (job_id, status_name))
+    return 0
+
+
+def _timeout_min() -> float:
+    raw = (os.environ.get("INPUT_TIMEOUT_MIN") or "").strip()
+    try:
+        value = float(raw)
+    except ValueError:
+        return float(trainmod.DEFAULT_TIMEOUT_MIN)
+    return value if value > 0 else float(trainmod.DEFAULT_TIMEOUT_MIN)
+
+
 def main() -> int:
     workspace = os.environ.get("GITHUB_WORKSPACE") or os.getcwd()
     tmp = os.environ.get("RUNNER_TEMP") or tempfile.gettempdir()
     if (os.environ.get("NEURARCH_STAGE") or "").strip().lower() == "fix":
         return run_fix(workspace, tmp, (os.environ.get("INPUT_API_KEY") or "").strip() or None)
     mode = (os.environ.get("INPUT_MODE") or "pr").strip().lower()
+    # A comment event is never a plan run: the plan has no base and no diff to compute, and
+    # `mode: train` is what the caller meant. Forgiving on purpose, and it cannot misfire,
+    # because train mode does nothing at all unless the comment is the command.
+    if mode == "pr" and (os.environ.get("GITHUB_EVENT_NAME") or "") == "issue_comment":
+        log("issue_comment event: running in train mode.")
+        mode = "train"
+    if mode == "train":
+        return run_train(workspace, tmp, (os.environ.get("INPUT_API_KEY") or "").strip() or None)
     if mode not in ("pr", "report"):
-        raise SystemExit("neurarch-bot: `mode` must be `pr` or `report`, not `%s`" % mode)
+        raise SystemExit("neurarch-bot: `mode` must be `pr`, `report` or `train`, not `%s`" % mode)
     config_path = os.path.join(workspace, os.environ.get("INPUT_CONFIG") or ".neurarch.yml")
     api_key = (os.environ.get("INPUT_API_KEY") or "").strip() or None
     fail_on_warn = env_flag("INPUT_FAIL_ON_WARN")

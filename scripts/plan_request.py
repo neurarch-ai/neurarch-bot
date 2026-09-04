@@ -13,7 +13,7 @@ import urllib.request
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlsplit
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 DEFAULT_API = "https://www.neurarch.com"
 PLAN_PATH = "/api/v1/plan"

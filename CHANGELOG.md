@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.0 (2026-09-03)
+
+- **New `train` mode: `/neurarch train` as a pull request comment submits one real GPU run and posts the curve back.** Selected automatically on an `issue_comment` event. Arguments are `epochs`, `dataset`, `gpu`, `model`, `batch`, `lr` and `optimizer`; anything the parser does not recognise is refused rather than ignored, because `epoch=3` silently training the default number of epochs is the failure that rule exists to prevent.
+- **Write access, or nothing.** A comment is something anyone with a GitHub account can leave and the API key belongs to whoever installed the Action, so only `OWNER`, `MEMBER` and `COLLABORATOR` can spend it. Everyone else gets one sentence and nothing is submitted. No key is the second refusal: there is no keyless training.
+- **Your house rules are checked before the money is.** `POST /api/v1/train` plans the graph on its own and never receives a `policy:` block, so a `max_params` line in `.neurarch.yml` would only be discovered after a GPU was booked. Train mode asks `/api/v1/plan` with the policy first, which costs nothing, and submits only what the repository's own rules allow. The endpoint's 422 stays the backstop for everything structural.
+- **A refusal is the product working, and the comment says so in those words.** A blocked design comes back 422 carrying the plan that explains it; the comment quotes the blockers and states that nothing was submitted and nothing was spent. Generating an architecture is cheap and training one that cannot forward-pass is not, which is the whole reason the verifier runs first.
+- **No GPU worker means 503, never a simulation.** The endpoint refuses to fall back to a heuristic curve and so does the bot: a simulated curve posted into someone's pull request as a training result is a fabricated measurement published under our name.
+- **One comment per run, edited as the epochs arrive.** Keyed on `<!-- neurarch-train:<job_id> -->`, so it is never confused with the plan comment and two runs on one pull request each keep their own. Polled every 20 seconds up to the new `timeout-min` input (default 20). A timeout stops the comment following the run, not the run.
+- **The curve is a unicode sparkline and a table, not a picture.** GitHub's comment sanitizer strips `src` from any `<img>` carrying a `data:` URI, in markdown and in raw HTML alike, and drops inline `<svg>` outright. Measured against a real comment on a real repository before the choice was made.
+- **A failed training run never fails the check.** The trainer's error is reported, trimmed, as what it is: a fact about the model, not a verdict on the pull request. The final comment carries the per-epoch table, the final metric in bold, wall clock, measured cost, whether the outcome ledger row was written, and therefore whether the next plan for this structure will quote this run.
+- The caller must check out the pull request head: an `issue_comment` event checks out the default branch, which is not the model anyone asked about. The README's workflow uses `ref: refs/pull/${{ github.event.issue.number }}/merge`.
+- New inputs `timeout-min`; new outputs `job-id` and `train-status`.
+
 ## 0.3.0 (2026-09-03)
 
 - **New `fix` input.** On a blocker, the bot patches the model, verifies its own work, and opens a pull request. It runs after the plan comment is posted, because the plan reaches the pull request whether or not a fix turns out to be possible.
