@@ -14,4 +14,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+      # The Action always has pyyaml (requirements.txt installs it before bot.py runs), and
+      # `load_config` falls back to JSON without it, so a suite without pyyaml tests a reader
+      # that never runs in production: the round-trip test for the config init writes cannot
+      # parse its own output.
+      - run: python -m pip install --quiet pyyaml
       - run: python -m unittest discover -s scripts -p 'test_*.py' -v
