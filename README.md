@@ -127,6 +127,21 @@ On failure nothing is pushed, and one line is added to the plan comment saying w
 
 **A second fix pull request is never opened.** The branch name is derived from the pull request number, so a re-run pushes the same branch and updates the pull request that is already open on it.
 
+### One repository setting, or the pull request 403s
+
+GitHub blocks an Action from opening a pull request unless the repository (or the organisation) allows it. The branch pushes fine, the API call comes back `403 Forbidden`, and the bot reports that it pushed the branch but could not open the pull request. Turn it on once:
+
+**Settings -> Actions -> General -> Workflow permissions -> "Allow GitHub Actions to create and approve pull requests"**
+
+or, from the CLI:
+
+```bash
+gh api -X PUT /repos/<owner>/<repo>/actions/permissions/workflow \
+  -F default_workflow_permissions=read -F can_approve_pull_request_reviews=true
+```
+
+An organisation can also set this for every repository at once, and an organisation policy of "off" wins over the repository's own setting. A `github-token` that is a PAT rather than the default `GITHUB_TOKEN` is not subject to it.
+
 ### The fix pull request has no check of its own
 
 A pull request opened with the default `GITHUB_TOKEN` **does not trigger workflows**. That is GitHub's rule, not ours, and it is there so an Action cannot start itself in a loop. So the fix pull request arrives without its own `Neurarch plan` check, even though the bot verified the patch before pushing it.

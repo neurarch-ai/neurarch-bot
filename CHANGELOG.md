@@ -10,6 +10,7 @@
 - **A patch is refused before it is applied** if it targets a file `.neurarch.yml` does not list, is absolute, or climbs out of the repository. The bot has a write token; the allowlist is the config's own model files and nothing else.
 - New `github-token` input, defaulting to `${{ github.token }}`. A pull request opened with the default token **does not trigger workflows**, so the fix pull request arrives with no bot check of its own; pass a PAT to get one.
 - **New `policy:` block in `.neurarch.yml`**, sent with every plan: `max_params`, `must_fit`, `max_layers`, `forbid_types` and `require_types` are blockers, `max_memory_gb` and `max_cost_usd` are warnings, each quoted as you wrote it. A model's own `policy` merges over the top-level one key by key, so tightening one line does not drop the rest. It needs no API key, because a policy can only make the verdict stricter.
+- **One repository setting is needed, or the pull request 403s.** GitHub blocks an Action from opening a pull request unless "Allow GitHub Actions to create and approve pull requests" is on. The branch pushes, the API call comes back 403, and the bot says it pushed the branch but could not open the pull request. The README says where the toggle is.
 - New outputs `fix-status`, `fix-pr-number`, `fix-pr-url`.
 
 ## 0.2.0 (2026-09-03)
