@@ -13,7 +13,10 @@ import urllib.request
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlsplit
 
-__version__ = "0.4.0"
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import policy_lines  # noqa: E402
+
+__version__ = "0.5.0"
 
 DEFAULT_API = "https://www.neurarch.com"
 PLAN_PATH = "/api/v1/plan"
@@ -174,6 +177,12 @@ def render_entry(entry: Dict[str, Any]) -> str:
             out.append("_%s_" % entry["base_note"])
             out.append("")
         out.append(_strip_leading_summary(entry.get("markdown", ""), summary).rstrip())
+        # The findings name the rule; this names the line somebody wrote it on. A policy
+        # blocker with nowhere to go reads as our opinion rather than as the repository's.
+        section = policy_lines.render_section(entry.get("rule_lines") or [])
+        if section:
+            out.append("")
+            out.append(section)
         return "\n".join(out)
 
     if status == "trace_failed":

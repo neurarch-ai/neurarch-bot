@@ -7,7 +7,7 @@ branding:
 
 inputs:
   mode:
-    description: '"pr" (default) plans the models a pull request touches and comments on it. "report" traces every model in the config at the current commit and upserts one issue titled "Neurarch weekly model report"; it never fails the job. "train" answers a `/neurarch train` comment on a pull request by submitting one real GPU run and editing its own comment as the epochs arrive; it is selected automatically on an `issue_comment` event, and it never fails the job either.'
+    description: '"pr" (default) plans the models a pull request touches and comments on it. "report" traces every model in the config at the current commit and upserts one issue titled "Neurarch weekly model report"; it never fails the job. "train" answers a `/neurarch train` comment on a pull request by submitting one real GPU run and editing its own comment as the epochs arrive; it is selected automatically on an `issue_comment` event, and it never fails the job either. "init" is for a repository that has no config yet: it walks the repository, traces every model it can construct, and opens a pull request adding a `.neurarch.yml` with those models and house rules derived from what it measured. It does nothing at all if a config already exists, and it never commits to a branch anybody works on.'
     required: false
     default: 'pr'
   config:
@@ -75,6 +75,15 @@ outputs:
   train-status:
     description: 'In train mode: "none", one of the "refused-..." reasons, "timeout", or the terminal status of the run ("completed", "error", "cancelled").'
     value: ${{ steps.bot.outputs.train-status }}
+  init-status:
+    description: 'In init mode: "exists" (a config is already there and nothing was done), "nothing-found", "opened", "updated", "no-token", "push-failed", "pr-failed" or "refused-same-branch".'
+    value: ${{ steps.bot.outputs.init-status }}
+  init-pr-number:
+    description: 'In init mode, the number of the pull request adding the config.'
+    value: ${{ steps.bot.outputs.init-pr-number }}
+  init-pr-url:
+    description: 'In init mode, the URL of the pull request adding the config.'
+    value: ${{ steps.bot.outputs.init-pr-url }}
   issue-number:
     description: 'In report mode, the number of the weekly report issue that was created or updated.'
     value: ${{ steps.report.outputs.issue-number }}

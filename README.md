@@ -8,6 +8,8 @@
 
 It reads your model the way the runtime does, by importing it and tracing a forward pass, so the numbers are the real ones and not a guess made from the text of the file.
 
+The rules it enforces are **yours**. A `policy:` block in `.neurarch.yml` turns your team's own lines (a parameter cap, a card everything must still fit, a layer type nobody may use) into blockers on every pull request, and the comment names the line of your config each one came from. You do not have to write that file: [`mode: init`](#mode-init-the-config-writes-itself) walks the repository, traces what it finds, and opens a pull request with a config whose numbers came from the measurement.
+
 ## Install
 
 Add `.github/workflows/neurarch-bot.yml`:
@@ -30,7 +32,7 @@ jobs:
       - uses: neurarch-ai/neurarch-bot@v0
 ```
 
-And `.neurarch.yml` at the repository root:
+And `.neurarch.yml` at the repository root. **You do not have to write it**: run the Action once with [`mode: init`](#mode-init-the-config-writes-itself) and it walks the repository, traces every model it can construct, and opens a pull request adding the file with your models in it and house rules derived from what it measured. By hand it looks like this:
 
 ```yaml
 models:
@@ -41,6 +43,38 @@ models:
 ```
 
 Per model you may also set `extra_inputs` (a list of further `--input` specs, for a forward that takes more than one tensor), `depth` (stop descending at this module depth), `name`, and `policy`.
+
+[**`examples/.neurarch.yml`**](./examples/.neurarch.yml) is every supported key, annotated: what each one blocks, what each one warns on, and a worked example of each. Copy it and delete what you do not want.
+
+### `mode: init`: the config writes itself
+
+```yaml
+name: Neurarch init
+on: workflow_dispatch          # run it once, from the Actions tab
+
+permissions:
+  contents: write              # to push the branch the config arrives on
+  pull-requests: write         # to open the pull request
+
+jobs:
+  init:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: neurarch-ai/neurarch-bot@v0
+        with:
+          mode: init
+```
+
+It walks the repository for `nn.Module` subclasses and `*.neurarch.json` graphs (skipping tests, build directories and virtualenvs), guesses each model's input shape from the first layer it constructs, traces it, and writes what came back. Then it opens **one pull request** titled `Add a Neurarch config` whose body explains the file line by line.
+
+Three things it will not do:
+
+- **It never invents a number.** `max_params` is a round number just above the largest model it actually measured here, `must_fit` is the smallest card every measured model actually fits, and the pull request body labels each line **measured** or **a suggestion**. `forbid_types` is the only suggestion, and it arrives commented out.
+- **It never commits to a branch anybody works on.** The config arrives as a pull request into the branch the run was on, because a config is a set of decisions and those are yours to make.
+- **It does nothing at all if a config already exists.** Not a diff, not a comment. Delete the file first if you want it rewritten.
+
+A model it could not construct (a constructor that takes arguments, an input shape the guess got wrong) is written into the file **commented out with the reason**, so nothing it found is silently dropped. So is a class another class in the same file constructs, which is a building block rather than a model.
 
 ### House rules: `policy`
 
@@ -65,7 +99,22 @@ models:
 
 A model's own `policy` merges over the top-level one key by key, so tightening one line does not drop the rest. A policy needs no API key: it can only make the verdict stricter, never more permissive. An unreadable line is reported inside the plan rather than failing the run.
 
-A pull request affects a listed model when the listed file changed, or when any other file in its directory changed (a helper module it imports). A sibling that is itself a listed model does not count: editing `models/cnn.py` is a change to the CNN entry, not to every model that shares the folder. With no `.neurarch.yml` the Action prints how to add one and exits 0.
+Every key, annotated, with what it blocks and what it warns on: [`examples/.neurarch.yml`](./examples/.neurarch.yml).
+
+#### The comment names the line the rule is written on
+
+A policy blocker used to read `policy: max_params 500K exceeded (1.1M)` and stop there, which leaves whoever thinks the rule is wrong with nowhere to go. Under the findings, the comment now carries one line per violated rule:
+
+> **The rules that fired, and where they live**
+>
+> - `max_params: 500K` is at [`.neurarch.yml:17`](#), in this model's own `policy:` block.
+> - `forbid_types: [softmax]` is at [`.neurarch.yml:9`](#), in the top-level `policy:` block.
+>
+> _Each of these is a decision someone here made, not a Neurarch default. If a rule is wrong, that line is the thing to change._
+
+The link goes to the line at the pull request's own commit. A rule the model overrode is quoted from the model's block and not from the top-level one, because that is the order the two are merged in before the verdict is asked for; a rule with no line in the file (it came from somewhere this run did not read) says so rather than pointing at a plausible wrong line.
+
+A pull request affects a listed model when the listed file changed, or when any other file in its directory changed (a helper module it imports). A sibling that is itself a listed model does not count: editing `models/cnn.py` is a change to the CNN entry, not to every model that shares the folder. With no `.neurarch.yml` the Action prints how to add one (or run `mode: init`) and exits 0.
 
 ## What the comment looks like
 
@@ -337,7 +386,7 @@ Four things worth knowing:
 
 | Input | Default | What it does |
 |---|---|---|
-| `mode` | `pr` | `pr` plans the models a pull request touches and comments on it. `report` traces every listed model and upserts the weekly issue. `train` answers a `/neurarch train` comment; selected automatically on an `issue_comment` event. |
+| `mode` | `pr` | `pr` plans the models a pull request touches and comments on it. `report` traces every listed model and upserts the weekly issue. `train` answers a `/neurarch train` comment; selected automatically on an `issue_comment` event. `init` writes the `.neurarch.yml` a repository does not have and opens a pull request adding it; it does nothing if one exists. |
 | `config` | `.neurarch.yml` | Path to the config listing the models, relative to the repository root. |
 | `api-key` | *(none)* | A Neurarch API key (`nrk_...`). Optional for the plan; keyless calls are rate-limited per hour and per IP. Also unlocks the server fix source, which is metered against the key owner's agent quota. **Required for `train`**, which spends the key owner's GPU budget. |
 | `fix` | `false` | On a blocker, patch the model, re-trace, re-plan, and open a fix pull request if the new plan is legal and the parameter count is within 10 percent of the head. Needs `contents: write`. |
@@ -361,6 +410,9 @@ Four things worth knowing:
 | `fix-pr-url` | The URL of the fix pull request. |
 | `job-id` | In train mode, the id of the job submitted, or empty when nothing was. |
 | `train-status` | In train mode: `none`, a `refused-...` reason, `timeout`, or the run's terminal status (`completed`, `error`, `cancelled`). |
+| `init-status` | In init mode: `exists` (a config is already there, nothing was done), `nothing-found`, `opened`, `updated`, `no-token`, `push-failed`, `pr-failed` or `refused-same-branch`. |
+| `init-pr-number` | In init mode, the number of the pull request adding the config. |
+| `init-pr-url` | In init mode, the URL of that pull request. |
 | `issue-number` | In report mode, the number of the weekly report issue created or updated. |
 | `issue-url` | In report mode, the URL of that issue. |
 

@@ -1,12 +1,15 @@
 """neurarch-bot driver: read `.neurarch.yml`, trace the models, ask the API about each, and
 write one comment (or one issue) body plus the step outputs.
 
-Three modes over one config-parse-and-trace path. `pr` finds the models this pull request
+Four modes over one config-parse-and-trace path. `pr` finds the models this pull request
 touches, traces HEAD and BASE, and writes a comment that a blocker turns red. `report` traces
 every listed model at the current commit with no base, and writes the weekly issue body, which
 never fails the job. `train` answers a `/neurarch train` comment on a pull request: it traces
 the one model asked for and submits a real GPU run, then edits its own comment as the epochs
-arrive. `pr` and `report` walk `process_model`; `train` walks `run_train` and `scripts/train.py`.
+arrive. `init` is the one mode that runs when there is no config at all: it walks the repository,
+traces what it can, and opens a pull request adding the `.neurarch.yml` the other three need.
+`pr` and `report` walk `process_model`; `train` walks `run_train` and `scripts/train.py`;
+`init` walks `run_init` and `scripts/init.py`.
 
 Runs inside the composite action after torch and neurarch-trace are installed. Everything that
 leaves the machine goes through `plan_request` or `train`; this file never reads a weight.
@@ -23,7 +26,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import fix as fixmod  # noqa: E402
+import init as initmod  # noqa: E402
 import plan_request  # noqa: E402
+import policy_lines  # noqa: E402
 import report  # noqa: E402
 import train as trainmod  # noqa: E402
 
@@ -147,16 +152,21 @@ def changed_files(workspace: str, base_sha: str, head_sha: str) -> List[str]:
     return [line.strip() for line in r.stdout.splitlines() if line.strip()]
 
 
-def add_base_worktree(workspace: str, base_sha: str, tmp: str) -> Optional[str]:
-    path = os.path.join(tmp, "neurarch-base")
+def add_worktree(workspace: str, sha: str, tmp: str, name: str) -> Optional[str]:
+    """A detached checkout of one commit, replacing any left behind by an earlier run."""
+    path = os.path.join(tmp, name)
     if os.path.isdir(path):
         git(["worktree", "remove", "--force", path], workspace)
         shutil.rmtree(path, ignore_errors=True)
-    r = git(["worktree", "add", "--detach", path, base_sha], workspace)
+    r = git(["worktree", "add", "--detach", path, sha], workspace)
     if r.returncode != 0:
-        log("could not check out base %s: %s" % (base_sha[:10], r.stderr.strip()))
+        log("could not check out %s: %s" % (sha[:10], r.stderr.strip()))
         return None
     return path
+
+
+def add_base_worktree(workspace: str, base_sha: str, tmp: str) -> Optional[str]:
+    return add_worktree(workspace, base_sha, tmp, "neurarch-base")
 
 
 def remove_worktree(workspace: str, path: Optional[str]) -> None:
@@ -295,6 +305,36 @@ def process_model(model: Dict[str, Any], workspace: str, base_dir: Optional[str]
     })
     print(response.get("text", ""), flush=True)
     return entry
+
+
+def attach_rule_locations(entries: List[Dict[str, Any]], config_path: str, config_rel: str,
+                          repo: Optional[str], sha: Optional[str]) -> None:
+    """Tell each entry where the policy rules it broke are written.
+
+    The verdict names the rule; this names the decision. Read from the config file this run
+    actually sent, at the commit that was planned, so the line number is the one the reader
+    sees when they open it from the pull request.
+    """
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            text = f.read()
+    except OSError as e:
+        log("could not re-read %s for rule locations: %s" % (config_rel, e))
+        return
+    locations = policy_lines.locate_rules(text)
+    blob = None
+    if repo and sha:
+        blob = "%s/%s/blob/%s" % ((os.environ.get("GITHUB_SERVER_URL") or "https://github.com").rstrip("/"),
+                                  repo, sha)
+    for entry in entries:
+        plan = entry.get("plan")
+        if not isinstance(plan, dict):
+            continue
+        lines = policy_lines.rule_lines(plan, locations, entry.get("target") or "", config_rel, blob)
+        if lines:
+            entry["rule_lines"] = lines
+            log("%s broke %d policy rule(s); the comment names the line each is written on."
+                % (entry.get("target"), len(lines)))
 
 
 def is_clean(entry: Dict[str, Any]) -> bool:
@@ -469,15 +509,7 @@ def plan_snapshot(entry: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def add_fix_worktree(workspace: str, head_sha: str, tmp: str) -> Optional[str]:
-    path = os.path.join(tmp, "neurarch-fix")
-    if os.path.isdir(path):
-        git(["worktree", "remove", "--force", path], workspace)
-        shutil.rmtree(path, ignore_errors=True)
-    r = git(["worktree", "add", "--detach", path, head_sha], workspace)
-    if r.returncode != 0:
-        log("could not check out the pull request head %s: %s" % (head_sha[:10], r.stderr.strip()))
-        return None
-    return path
+    return add_worktree(workspace, head_sha, tmp, "neurarch-fix")
 
 
 def read_files(root: str, paths: List[str]) -> List[Dict[str, str]]:
@@ -738,6 +770,246 @@ def post_fix_line(token: str, repo: str, pr: int, line: str) -> None:
         log("could not update the plan comment with the fix line: %s" % e)
 
 
+# ---------------------------------------------------------------- init stage
+
+
+def measure_graph(graph: Dict[str, Any], target: str, input_spec: str,
+                  api_key: Optional[str]) -> Optional[Dict[str, Any]]:
+    """Params, layers and GPU fit for one traced graph, from the same endpoint that will
+    later enforce the rules derived from them. No policy is sent: nothing is being judged."""
+    try:
+        response = plan_request.request_plan(
+            graph, None, plan_request.build_source(target, input_spec, None), api_key=api_key)
+    except plan_request.PlanRequestError as e:
+        log("could not plan %s: %s" % (target, e))
+        return None
+    plan = response.get("plan") or {}
+    model = plan.get("model") or {}
+    cost = plan.get("cost") or {}
+    fits = initmod.smallest_gpu([{"gpu_fits": cost.get("gpuFits") or {}}])
+    return {"target": target, "params": model.get("params"), "layers": model.get("layers"),
+            "gpu_fits": cost.get("gpuFits") or {}, "fits": fits[0] if fits else None}
+
+
+def init_candidate(candidate: Dict[str, Any], workspace: str, tmp: str,
+                   api_key: Optional[str]) -> Dict[str, Any]:
+    """Trace one discovered class with each guessed input in turn, then measure what traced."""
+    entry = {"target": candidate["target"], "file": candidate["file"], "name": candidate["name"],
+             "input": candidate["inputs"][0], "status": "skipped"}
+    if candidate.get("part_of"):
+        entry["reason"] = ("`%s` constructs it in the same file, so it is a part of that model "
+                           "rather than a model. Uncomment it if you plan it on its own."
+                           % candidate["part_of"])
+        return entry
+    if candidate["needs_args"]:
+        entry["reason"] = ("`%s()` takes %s, so it cannot be constructed with no arguments. "
+                           "Add a zero-argument factory beside it and list that instead."
+                           % (candidate["name"], ", ".join("`%s`" % a for a in candidate["needs_args"])))
+        return entry
+    out_dir = os.path.join(tmp, "neurarch-init", slug(candidate["target"]))
+    os.makedirs(out_dir, exist_ok=True)
+    graph_path = os.path.join(out_dir, "head.neurarch.json")
+    last = ""
+    for spec in candidate["inputs"]:
+        model = {"target": candidate["target"], "file": candidate["file"], "input": spec,
+                 "extra_inputs": [], "depth": None, "name": None}
+        log("tracing %s (guessed input %s)" % (candidate["target"], spec))
+        ok, msg = trace(model, workspace, graph_path)
+        if ok:
+            entry["input"] = spec
+            with open(graph_path, "r", encoding="utf-8") as f:
+                graph = json.load(f)
+            measured = measure_graph(graph, candidate["target"], spec, api_key)
+            if measured is None:
+                entry["status"] = "traced"
+                return entry
+            entry.update({"status": "measured", "params": measured["params"],
+                          "layers": measured["layers"], "fits": measured["fits"],
+                          "gpu_fits": measured["gpu_fits"]})
+            return entry
+        last = (msg or "").splitlines()[-1] if msg else "no output"
+    entry["reason"] = ("it did not trace with %s (the input spec is a guess read off its first "
+                       "layer). Last error: `%s`."
+                       % (" or ".join("`%s`" % s for s in candidate["inputs"]), last[:200]))
+    return entry
+
+
+def init_graph_entry(rel: str, workspace: str, api_key: Optional[str]) -> Optional[Dict[str, Any]]:
+    """A `*.neurarch.json` already in the repository, measured but never listed: a config
+    entry is a python entry point, and a graph file has none."""
+    path = os.path.join(workspace, rel)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            graph = json.load(f)
+    except (OSError, ValueError) as e:
+        log("could not read %s: %s" % (rel, e))
+        return None
+    return measure_graph(graph, rel, "", api_key)
+
+
+def run_init(workspace: str, tmp: str, api_key: Optional[str], config_path: str,
+             base_outputs: Dict[str, str], run_url: Optional[str]) -> int:
+    """`mode: init`: write the config this repository does not have, as a pull request.
+
+    Does nothing at all when a config already exists, and never writes to a branch anybody
+    works on. Never returns non-zero: a repository with nothing to find is not a broken run.
+    """
+    name = os.path.basename(config_path)
+    out = dict(base_outputs)
+    out.update({"init-status": "none", "init-pr-url": "", "init-pr-number": ""})
+    if os.path.isfile(config_path):
+        log("%s already exists; init does nothing. Delete it first if you want it rewritten." % name)
+        out["init-status"] = "exists"
+        write_outputs(out)
+        return 0
+
+    found = initmod.discover(workspace)
+    candidates = found["candidates"]
+    graphs = found["graphs"]
+    log("walked %d python file(s): %d candidate model(s), %d traced graph(s)."
+        % (found["python_files"], len(candidates), len(graphs)))
+    if not candidates and not graphs:
+        log("nothing that looks like a model in this repository; writing nothing.")
+        out["init-status"] = "nothing-found"
+        write_outputs(out)
+        return 0
+
+    # The trace budget is spent on things that look like models: a `Block` another class in the
+    # same file constructs is answered without tracing it, so a transformer file cannot eat the
+    # budget with its own parts.
+    whole = [c for c in candidates if not c.get("part_of")]
+    parts = [c for c in candidates if c.get("part_of")]
+    entries = [init_candidate(c, workspace, tmp, api_key) for c in whole[:initmod.MAX_TRACE]]
+    for extra in whole[initmod.MAX_TRACE:]:
+        entries.append({"target": extra["target"], "file": extra["file"], "name": extra["name"],
+                        "input": extra["inputs"][0], "status": "skipped",
+                        "reason": "found, but this run traces the first %d models it sees; "
+                                  "uncomment it to have it planned too." % initmod.MAX_TRACE})
+    entries.extend(init_candidate(c, workspace, tmp, api_key) for c in parts)
+    measured = [e for e in entries if e.get("status") == "measured"]
+    for rel in graphs[:initmod.MAX_TRACE]:
+        row = init_graph_entry(rel, workspace, api_key)
+        if row:
+            measured.append(row)
+
+    derived = initmod.derive_policy(measured)
+    text = initmod.render_config(entries, derived, __version__, graphs=graphs)
+    body = initmod.pr_body(entries, derived, __version__, config_name=name, graphs=graphs,
+                           run_url=run_url, api_host=plan_request.api_host(plan_request.api_base()),
+                           searched=found["python_files"])
+    log("derived %s from %d measured model(s)."
+        % (", ".join("%s: %s" % (k, v["value"]) for k, v in sorted(derived.items())), len(measured)))
+    print(text, flush=True)
+
+    config_out = os.path.join(tmp, "neurarch-init-config.yml")
+    with open(config_out, "w", encoding="utf-8") as f:
+        f.write(text)
+    body_path = os.path.join(tmp, "neurarch-init-body.md")
+    with open(body_path, "w", encoding="utf-8") as f:
+        f.write(body)
+    out["init-config-path"] = config_out
+    summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary_path:
+        with open(summary_path, "a", encoding="utf-8") as f:
+            f.write(body.replace(initmod.MARKER + "\n", "", 1))
+
+    token = (os.environ.get("INPUT_GITHUB_TOKEN") or "").strip()
+    repo = os.environ.get("GITHUB_REPOSITORY") or ""
+    if not token or not repo:
+        log("no github-token or repository, so the config was written to %s and nowhere else."
+            % config_out)
+        out["init-status"] = "no-token"
+        write_outputs(out)
+        return 0
+    status, number, url = open_init_pr(workspace, tmp, name, text, body, token, repo)
+    out.update({"init-status": status, "init-pr-number": str(number or ""), "init-pr-url": url or ""})
+    write_outputs(out)
+    return 0
+
+
+def default_branch(repo: str, token: str) -> Optional[str]:
+    try:
+        data = fixmod.gh_request("GET", "/repos/%s" % repo, token)
+    except fixmod.FixError as e:
+        log("could not read the default branch (%s)." % e)
+        return None
+    return str(data.get("default_branch")) if isinstance(data, dict) and data.get("default_branch") else None
+
+
+def current_branch() -> Optional[str]:
+    ref = os.environ.get("GITHUB_REF") or ""
+    if ref.startswith("refs/heads/"):
+        return ref[len("refs/heads/"):]
+    return None
+
+
+def open_init_pr(workspace: str, tmp: str, config_name: str, text: str, body: str,
+                 token: str, repo: str) -> Tuple[str, Optional[int], Optional[str]]:
+    """Commit the config on a branch of its own and open the pull request.
+
+    The base is the branch this ran on, because that is the tree that was measured; the branch
+    written to is never it. A default branch is where a repository's own work lives and a bot
+    with a write token does not get to put a file there because it thinks the file is a good
+    idea.
+    """
+    default = default_branch(repo, token)
+    base = current_branch() or default
+    if not base:
+        log("could not work out which branch to open the pull request into; writing nothing.")
+        return "no-base", None, None
+    branch = initmod.branch_name(base, default)
+    if branch == base:
+        log("the branch to push (%s) is the branch to open into; refusing to commit to it." % branch)
+        return "refused-same-branch", None, None
+
+    head_sha = os.environ.get("GITHUB_SHA") or "HEAD"
+    scratch = add_worktree(workspace, head_sha, tmp, "neurarch-init")
+    if scratch is None:
+        return "worktree-failed", None, None
+    try:
+        with open(os.path.join(scratch, config_name), "w", encoding="utf-8") as f:
+            f.write(text)
+        git(["config", "user.name", "neurarch-bot"], scratch)
+        git(["config", "user.email", "neurarch-bot@users.noreply.github.com"], scratch)
+        git(["add", "--", config_name], scratch)
+        message = "Add %s: the models in this repository, and the house rules for them\n" % config_name
+        r = git(["commit", "-m", message], scratch)
+        if r.returncode != 0:
+            log("nothing to commit: %s" % (r.stdout or r.stderr).strip())
+            return "nothing-to-commit", None, None
+        server = os.environ.get("GITHUB_SERVER_URL") or "https://github.com"
+        remote = ("%s/%s.git" % (server.rstrip("/"), repo)).replace(
+            "https://", "https://x-access-token:%s@" % token, 1)
+        r = git(["push", "--force", remote, "HEAD:refs/heads/%s" % branch], scratch)
+        if r.returncode != 0:
+            log("push failed: %s" % _scrub(r.stderr.strip(), token))
+            return "push-failed", None, None
+    finally:
+        remove_worktree(workspace, scratch)
+
+    owner = repo.split("/")[0]
+    try:
+        open_prs = fixmod.gh_request("GET", "/repos/%s/pulls?state=open&head=%s:%s&per_page=100"
+                                     % (repo, owner, branch), token) or []
+        existing = fixmod.existing_fix_pr(open_prs, branch)
+        if existing:
+            fixmod.gh_request("PATCH", "/repos/%s/pulls/%d" % (repo, existing["number"]), token,
+                              {"title": initmod.TITLE, "body": body})
+            log("updated the config pull request: %s" % existing.get("html_url"))
+            return "updated", int(existing["number"]), str(existing.get("html_url") or "")
+        created = fixmod.gh_request("POST", "/repos/%s/pulls" % repo, token, {
+            "title": initmod.TITLE, "body": body, "head": branch, "base": base,
+            "maintainer_can_modify": True})
+    except fixmod.FixError as e:
+        log("the branch %s was pushed but the pull request could not be opened (%s). "
+            "Is \"Allow GitHub Actions to create and approve pull requests\" on?" % (branch, e))
+        return "pr-failed", None, None
+    if not isinstance(created, dict) or not created.get("number"):
+        return "pr-failed", None, None
+    log("opened the config pull request: %s" % created.get("html_url"))
+    return "opened", int(created["number"]), str(created.get("html_url") or "")
+
+
 # ---------------------------------------------------------------- train stage
 
 
@@ -981,8 +1253,8 @@ def main() -> int:
         mode = "train"
     if mode == "train":
         return run_train(workspace, tmp, (os.environ.get("INPUT_API_KEY") or "").strip() or None)
-    if mode not in ("pr", "report"):
-        raise SystemExit("neurarch-bot: `mode` must be `pr`, `report` or `train`, not `%s`" % mode)
+    if mode not in ("pr", "report", "init"):
+        raise SystemExit("neurarch-bot: `mode` must be `pr`, `report`, `train` or `init`, not `%s`" % mode)
     config_path = os.path.join(workspace, os.environ.get("INPUT_CONFIG") or ".neurarch.yml")
     api_key = (os.environ.get("INPUT_API_KEY") or "").strip() or None
     fail_on_warn = env_flag("INPUT_FAIL_ON_WARN")
@@ -1008,11 +1280,18 @@ def main() -> int:
                     "report": "none", "report-body-path": "", "report-comment-path": "",
                     "report-title": report.TITLE, "state-path": ""}
 
+    if mode == "init":
+        return run_init(workspace, tmp, api_key, config_path, base_outputs, run_url)
+
     config = load_config(config_path)
     if config is None:
         log("no %s in this repository; nothing to plan." % os.path.basename(config_path))
         print("""
-Add a .neurarch.yml at the repository root listing the models to plan on every pull request:
+Run this Action once with `mode: init` and it writes the config for you: it walks the
+repository, traces every model it can construct, and opens a pull request adding a
+.neurarch.yml with those models and house rules derived from what it measured.
+
+Or write it by hand. It lists the models to plan on every pull request:
 
   models:
     - path: models/gpt.py:TinyGPT     # file.py:ClassOrFactory (called with no arguments)
@@ -1030,6 +1309,9 @@ into blockers and warnings in the same plan:
     max_params: 200M
     must_fit: A100-40GB
     forbid_types: [softmax]
+
+Every supported key, annotated, with what blocks and what warns:
+https://github.com/neurarch-ai/neurarch-bot/blob/main/examples/.neurarch.yml
 """)
         write_outputs(base_outputs)
         return 0
@@ -1072,6 +1354,8 @@ into blockers and warnings in the same plan:
                                          policy=policies.get(m["target"])))
     finally:
         remove_worktree(workspace, base_dir)
+    attach_rule_locations(entries, config_path, os.environ.get("INPUT_CONFIG") or ".neurarch.yml",
+                          os.environ.get("GITHUB_REPOSITORY"), head_sha)
 
     blockers = sum(e["blockers"] for e in entries)
     warnings = sum(e["warnings"] for e in entries)
