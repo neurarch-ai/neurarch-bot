@@ -137,7 +137,8 @@ runs:
         BIN="$DIR/node_modules/.bin/neurarch-mcp"
         test -x "$BIN" || { echo "::warning::neurarch-mcp did not install; the exact-patch source will be skipped"; exit 0; }
         echo "NEURARCH_MCP_BIN=$BIN" >> "$GITHUB_ENV"
-        echo "installed $("$BIN" --version 2>/dev/null || echo 'unknown')
+        VER=$("$BIN" --version 2>/dev/null || echo unknown)
+        echo "neurarch-mcp $VER installed at $BIN"
 
     - name: Install torch and neurarch-trace
       shell: bash
