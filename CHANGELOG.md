@@ -11,6 +11,7 @@
 - **The curve is a unicode sparkline and a table, not a picture.** GitHub's comment sanitizer strips `src` from any `<img>` carrying a `data:` URI, in markdown and in raw HTML alike, and drops inline `<svg>` outright. Measured against a real comment on a real repository before the choice was made.
 - **A failed training run never fails the check.** The trainer's error is reported, trimmed, as what it is: a fact about the model, not a verdict on the pull request. The final comment carries the per-epoch table, the final metric in bold, wall clock, measured cost, whether the outcome ledger row was written, and therefore whether the next plan for this structure will quote this run.
 - The caller must check out the pull request head: an `issue_comment` event checks out the default branch, which is not the model anyone asked about. The README's workflow uses `ref: refs/pull/${{ github.event.issue.number }}/merge`.
+- **A finished run with no cost says so.** The endpoint prices a run from its wall clock at the rate of the card on the job row, and a row with no card recorded comes back with a null `est_cost_usd`; the first live run did exactly that. A missing line would read as "free" to whoever pays the bill, so the row is printed either way.
 - New inputs `timeout-min`; new outputs `job-id` and `train-status`.
 
 ## 0.3.0 (2026-09-03)

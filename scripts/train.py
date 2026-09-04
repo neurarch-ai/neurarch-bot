@@ -598,6 +598,12 @@ def run_comment(job_id: str, target: str, dataset: str, config: Dict[str, Any],
     if job.get("est_cost_usd") is not None:
         table.append(("Cost", "%s (measured from wall clock at this card's rate)"
                       % fmt_money(job.get("est_cost_usd"))))
+    elif status in TERMINAL_STATUSES:
+        # Said out loud rather than left out. The endpoint prices a run from its wall clock at
+        # the rate of the card on the job row, and a row with no card recorded has no rate; a
+        # missing line would read as "free" to anyone paying the bill.
+        table.append(("Cost", "not reported (`est_cost_usd` is null for this job, so there is "
+                              "no rate to price the wall clock against)"))
     lines.append("| | |")
     lines.append("|---|---|")
     lines += ["| %s | %s |" % (k, v) for k, v in table]

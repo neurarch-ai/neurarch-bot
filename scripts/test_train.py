@@ -446,6 +446,12 @@ class RunCommentTests(unittest.TestCase):
         self.assertIn("AssertionError: embed_dim must be divisible by num_heads", body)
         self.assertNotIn("val acc", body)
 
+    def test_an_unpriced_finished_run_says_so_rather_than_reading_as_free(self):
+        job = job_fixture("completed", epochs=3)
+        job["est_cost_usd"] = None
+        body = self.body(job=job)
+        self.assertIn("| Cost | not reported (`est_cost_usd` is null", body)
+
     def test_a_simulated_run_is_never_reported_as_a_measurement(self):
         body = self.body(job=job_fixture("simulation", epochs=3))
         self.assertIn("not a training run", body)
