@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.5.1
+
+### Fixed
+- **The exact-patch source no longer goes through `npx`.** Measured 2026-09-04
+  on a warm cache: the identical three JSON-RPC messages are answered in about
+  0.1s by `node_modules/.bin/neurarch-mcp` and not at all in 90s through
+  `npx -y neurarch-mcp`, with nothing on stderr. Every pull request with a
+  blocker was sitting out the full timeout for a call that would have
+  succeeded, which took a fix run to about 18 minutes. The Action now installs
+  a pinned `neurarch-mcp` (new `mcp-version` input, default 0.15.1) and passes
+  the binary path in `NEURARCH_MCP_BIN`; `npx` remains the fallback for anyone
+  running `fix.py` outside the Action. The timeout drops from 300s to 60s,
+  because past a minute this call is hung, not slow.
+
 ## 0.5.0 (2026-09-04)
 
 - **New `mode: init`: the config writes itself.** Policy existed end to end (the endpoint enforced it, the bot sent it, the MCP server read it) and a repository only got it if somebody knew to write a `policy:` block by hand, which is a feature nobody switched on. Init walks the repository for `nn.Module` subclasses and `*.neurarch.json` graphs, guesses each model's input shape from the first layer it constructs, traces it, and opens one pull request titled `Add a Neurarch config`.

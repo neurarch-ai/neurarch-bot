@@ -38,7 +38,14 @@ MAX_ROUNDS = 3
 PARAM_TOLERANCE = 0.10
 MAX_FIX_FILES = 8
 MCP_PACKAGE = os.environ.get("NEURARCH_MCP_PACKAGE") or "neurarch-mcp@0.15"
-MCP_TIMEOUT = 300
+# The installed binary, when the Action put one there. Preferred over npx for
+# the reason in `mcp_suggest_fix`, and it is also the only way the version is
+# pinned: `npx -y <name>` silently takes whatever is newest on every run.
+MCP_BIN = os.environ.get("NEURARCH_MCP_BIN") or ""
+# 60s, not 300s. The call itself answers in about a tenth of a second once the
+# server is up; anything past a minute is a hang, and waiting five of them for
+# every blocked pull request is how a gate teaches people to ignore it.
+MCP_TIMEOUT = int(os.environ.get("NEURARCH_MCP_TIMEOUT") or 60)
 TIMEOUT_SECONDS = 120
 
 
@@ -168,7 +175,15 @@ def mcp_suggest_fix(py_path: str, cwd: str, timeout: int = MCP_TIMEOUT,
     it has answered, and `communicate()` waits for EOF, so a call that had already succeeded
     was reported as a timeout.
     """
-    cmd = ["npx", "-y", package or MCP_PACKAGE, py_path, "--tools=full"]
+    # Prefer the installed binary. Under `npx` this call hangs: measured on
+    # 2026-09-04, the same three JSON-RPC messages get an answer in 0.1s from
+    # `node_modules/.bin/neurarch-mcp` and no answer at all in 90s through
+    # `npx -y neurarch-mcp`, cache warm, nothing on stderr. Every blocked pull
+    # request was paying the full timeout for a call that would have succeeded.
+    # npx stays as the fallback for anyone running this script outside the
+    # Action, where nothing has been installed.
+    cmd = ([MCP_BIN, py_path, "--tools=full"] if MCP_BIN
+           else ["npx", "-y", package or MCP_PACKAGE, py_path, "--tools=full"])
     try:
         proc = subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, text=True, bufsize=1)

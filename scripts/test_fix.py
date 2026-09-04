@@ -4,6 +4,7 @@ round limit, the "already has an open fix PR" path, and the two comment lines.
 No torch, no GitHub, no network beyond a stub HTTP server on loopback, and no neurarch-mcp:
 every source is an injected callable, which is the reason `run_fix_rounds` takes them that way.
 """
+import importlib
 import json
 import os
 import subprocess
@@ -11,6 +12,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest import mock
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -592,3 +594,52 @@ class CommitOnlyThePatchedFilesTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class McpBinaryPreferred(unittest.TestCase):
+    """The exact-patch source must not go through npx.
+
+    Measured 2026-09-04 on a warm cache: the same three JSON-RPC messages are
+    answered in about 0.1s by node_modules/.bin/neurarch-mcp and not at all in
+    90s through `npx -y neurarch-mcp`, with nothing on stderr. Every blocked
+    pull request was therefore sitting out the whole timeout for a call that
+    would have succeeded, which is how a gate teaches people to ignore it.
+    """
+
+    def test_uses_the_installed_binary_when_the_action_provided_one(self):
+        seen = {}
+
+        class FakeProc:
+            def __init__(self, *a, **k):
+                seen['cmd'] = a[0]
+                raise OSError('stop here, the command line is what this test is about')
+
+        with mock.patch.dict(os.environ, {'NEURARCH_MCP_BIN': '/tmp/bin/neurarch-mcp'}):
+            importlib.reload(fix)
+            with mock.patch.object(fix.subprocess, 'Popen', FakeProc):
+                with self.assertRaises(fix.FixError):
+                    fix.mcp_suggest_fix('models/a.py', '.')
+        self.assertEqual(seen['cmd'][0], '/tmp/bin/neurarch-mcp')
+        self.assertNotIn('npx', seen['cmd'])
+
+    def test_falls_back_to_npx_outside_the_action(self):
+        seen = {}
+
+        class FakeProc:
+            def __init__(self, *a, **k):
+                seen['cmd'] = a[0]
+                raise OSError('stop here')
+
+        env = {k: v for k, v in os.environ.items() if k != 'NEURARCH_MCP_BIN'}
+        with mock.patch.dict(os.environ, env, clear=True):
+            importlib.reload(fix)
+            with mock.patch.object(fix.subprocess, 'Popen', FakeProc):
+                with self.assertRaises(fix.FixError):
+                    fix.mcp_suggest_fix('models/a.py', '.')
+        self.assertEqual(seen['cmd'][0], 'npx')
+
+    def test_the_timeout_is_a_minute_not_five(self):
+        env = {k: v for k, v in os.environ.items() if k != 'NEURARCH_MCP_TIMEOUT'}
+        with mock.patch.dict(os.environ, env, clear=True):
+            importlib.reload(fix)
+            self.assertEqual(fix.MCP_TIMEOUT, 60)

@@ -22,6 +22,10 @@ inputs:
     description: 'Set to "true" to let the bot try to fix a blocker: it patches a scratch worktree, re-traces and re-plans, and opens a pull request into the head branch of the pull request that broke it, but only if the new plan is legal and the parameter count is within 10 percent of that head. On failure it says what it tried and pushes nothing.'
     required: false
     default: 'false'
+  mcp-version:
+    description: 'The neurarch-mcp version the exact-patch source installs. Pinned on purpose: the alternative, running it through `npx -y`, takes whatever is newest on every run and, measured 2026-09-04, does not answer at all over stdio.'
+    required: false
+    default: '0.15.1'
   github-token:
     description: 'Token used to push the fix branch, open the fix pull request and add one line to the plan comment. The default GITHUB_TOKEN works, but a pull request it opens does NOT trigger workflows, so the fix PR gets no bot check of its own; pass a PAT to get one.'
     required: false
@@ -107,17 +111,33 @@ runs:
         restore-keys: |
           neurarch-bot-${{ runner.os }}-py${{ inputs.python-version }}-
 
-    # The exact-patch source runs `npx neurarch-mcp`, which downloads the package on a cold
-    # runner. Cached, the whole call is a couple of seconds; uncached it is the slowest thing
-    # in the fix step.
+    # The exact-patch source talks to neurarch-mcp over stdio. It is INSTALLED
+    # rather than run through `npx`: measured 2026-09-04, the identical three
+    # JSON-RPC messages are answered in about 0.1s by the installed binary and
+    # not at all in 90s through `npx -y`, with a warm cache and nothing on
+    # stderr, so every blocked pull request sat out the full timeout for a call
+    # that would have worked. Installing also pins the version, which `npx -y`
+    # does not: it takes whatever is newest, on every run.
     - name: Cache npm (neurarch-mcp for the exact patch)
       if: inputs.fix == 'true' && inputs.mode != 'report'
       uses: actions/cache@v4
       with:
         path: ~/.npm
-        key: neurarch-bot-npm-${{ runner.os }}-neurarch-mcp
+        key: neurarch-bot-npm-${{ runner.os }}-${{ inputs.mcp-version }}
         restore-keys: |
           neurarch-bot-npm-${{ runner.os }}-
+
+    - name: Install neurarch-mcp
+      if: inputs.fix == 'true' && inputs.mode != 'report'
+      shell: bash
+      run: |
+        DIR="${RUNNER_TEMP}/neurarch-mcp"
+        mkdir -p "$DIR"
+        npm install --silent --no-audit --no-fund --prefix "$DIR" "neurarch-mcp@${{ inputs.mcp-version }}"
+        BIN="$DIR/node_modules/.bin/neurarch-mcp"
+        test -x "$BIN" || { echo "::warning::neurarch-mcp did not install; the exact-patch source will be skipped"; exit 0; }
+        echo "NEURARCH_MCP_BIN=$BIN" >> "$GITHUB_ENV"
+        echo "installed $("$BIN" --version 2>/dev/null || echo 'unknown')
 
     - name: Install torch and neurarch-trace
       shell: bash
