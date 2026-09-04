@@ -493,7 +493,7 @@ def pr_body(entries: List[Dict[str, Any]], derived: Dict[str, Dict[str, Any]], v
     parts.append("")
     parts.append("This is the part worth arguing with. A policy line is a decision your team "
                  "makes; the plan enforces it on every pull request and quotes it back as you "
-                 "wrote it. The bot suggests these three and nothing else.")
+                 "wrote it. The bot suggests these %d and nothing else." % len(derived))
     parts.append("")
     for key in ("max_params", "must_fit", "max_layers", "forbid_types", "require_types",
                 "max_memory_gb", "max_cost_usd"):
@@ -502,7 +502,9 @@ def pr_body(entries: List[Dict[str, Any]], derived: Dict[str, Dict[str, Any]], v
             continue
         state = "on" if rule.get("live") else "commented out"
         label = "**measured**" if rule["kind"] == "measured" else "**a suggestion, not a measurement**"
-        parts.append("- `%s: %s` (%s, %s). %s" % (key, rule["value"], state, label, rule["because"]))
+        because = rule["because"]
+        parts.append("- `%s: %s` (%s, %s). %s" % (key, rule["value"], state, label,
+                                                  because[:1].upper() + because[1:]))
     parts.append("")
     parts.append("Every other supported key, with what it blocks and what it warns on, is in "
                  "[the annotated example](%s)." % EXAMPLE_URL)
