@@ -520,5 +520,39 @@ class FixPrBodyTests(unittest.TestCase):
         self.assertIn("no api-key is set", b)
 
 
+class CommitOnlyThePatchedFilesTests(unittest.TestCase):
+    """Tracing the model in the scratch worktree writes `__pycache__/*.pyc` next to the source.
+    The first fix pull request this bot ever opened carried one, because the commit was
+    `git add -A`. The commit is the patch's own paths and nothing else."""
+
+    def test_a_byproduct_of_the_trace_is_not_committed(self):
+        import bot  # noqa: PLC0415
+
+        root = tempfile.mkdtemp()
+        work, bare = os.path.join(root, "w"), os.path.join(root, "bare.git")
+        os.makedirs(os.path.join(work, "models", "__pycache__"))
+        subprocess.run(["git", "init", "-q", "--bare", bare], capture_output=True)
+        with open(os.path.join(work, "models", "small_cnn.py"), "w") as f:
+            f.write(ORIGINAL)
+        for cmd in (["git", "init", "-q"], ["git", "add", "-A"],
+                    ["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "x"]):
+            subprocess.run(cmd, cwd=work, capture_output=True)
+        with open(os.path.join(work, "models", "small_cnn.py"), "w") as f:
+            f.write("line one\nline TWO\nline three\n")
+        with open(os.path.join(work, "models", "__pycache__", "small_cnn.cpython-311.pyc"), "wb") as f:
+            f.write(b"\x00byte code")
+
+        os.environ["GITHUB_SERVER_URL"] = "file://" + root
+        try:
+            ok = bot.push_fix_branch(work, work, "bare", "tok", "neurarch/fix-pr4", 4,
+                                     "models/small_cnn.py:SmallCNN", ["models/small_cnn.py"])
+        finally:
+            os.environ.pop("GITHUB_SERVER_URL", None)
+        self.assertTrue(ok)
+        listed = subprocess.run(["git", "show", "--name-only", "--format=", "neurarch/fix-pr4"],
+                                cwd=bare, capture_output=True, text=True).stdout.split()
+        self.assertEqual(listed, ["models/small_cnn.py"])
+
+
 if __name__ == "__main__":
     unittest.main()

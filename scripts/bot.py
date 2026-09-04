@@ -615,7 +615,8 @@ def run_fix(workspace: str, tmp: str, api_key: Optional[str]) -> int:
     body = fixmod.fix_pr_body(pr, target, before, outcome["after"], outcome["source"],
                               outcome["patches"], outcome["rounds"], __version__,
                               notes=outcome["notes"], skipped=skipped)
-    pushed = push_fix_branch(scratch, workspace, repo, token, branch, pr, target)
+    pushed = push_fix_branch(scratch, workspace, repo, token, branch, pr, target,
+                             [str(p.get("path")) for p in outcome["patches"] if p.get("path")])
     remove_worktree(workspace, scratch)
     if not pushed:
         line = fixmod.failure_line("the fix passed the gate but the branch could not be pushed "
@@ -647,10 +648,17 @@ def run_fix(workspace: str, tmp: str, api_key: Optional[str]) -> int:
 
 
 def push_fix_branch(scratch: str, workspace: str, repo: str, token: str, branch: str,
-                    pr: int, target: str) -> bool:
+                    pr: int, target: str, paths: List[str]) -> bool:
+    """Commit exactly the files the patch named, and push the branch.
+
+    Never `git add -A`: tracing the model in this worktree imports it, which writes
+    `__pycache__/*.pyc` next to the source, and the first fix pull request this bot ever opened
+    carried one. The commit is the patch's own paths and nothing else.
+    """
     git(["config", "user.name", "neurarch-bot"], scratch)
     git(["config", "user.email", "neurarch-bot@users.noreply.github.com"], scratch)
-    git(["add", "-A"], scratch)
+    for path in sorted(set(paths)):
+        git(["add", "--", path], scratch)
     message = "fix: resolve the blocker neurarch-bot found on #%d\n\nModel: %s\n" % (pr, target)
     r = git(["commit", "-m", message], scratch)
     if r.returncode != 0:
