@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.2
+
+### Fixed
+- **An unbalanced quote in 0.5.1's install step took the whole Action down** with
+  `unexpected EOF while looking for matching '"'`, skipping every later step on
+  the first pull request that ran it. `scripts/test_action_yaml.py` now runs
+  `bash -n` over every `run:` block in `action.yml`, because a composite
+  action's shell blocks are strings inside YAML and nothing was reading them.
+
 ## 0.5.1
 
 ### Fixed
