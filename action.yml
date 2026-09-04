@@ -18,6 +18,14 @@ inputs:
     description: 'A Neurarch API key (nrk_...). Optional; keyless calls are rate-limited per hour and per IP.'
     required: false
     default: ''
+  fix:
+    description: 'Set to "true" to let the bot try to fix a blocker: it patches a scratch worktree, re-traces and re-plans, and opens a pull request into the head branch of the pull request that broke it, but only if the new plan is legal and the parameter count is within 10 percent of that head. On failure it says what it tried and pushes nothing.'
+    required: false
+    default: 'false'
+  github-token:
+    description: 'Token used to push the fix branch, open the fix pull request and add one line to the plan comment. The default GITHUB_TOKEN works, but a pull request it opens does NOT trigger workflows, so the fix PR gets no bot check of its own; pass a PAT to get one.'
+    required: false
+    default: ${{ github.token }}
   fail-on-warn:
     description: 'Set to "true" to fail the check on warnings, not just blockers.'
     required: false
@@ -48,6 +56,15 @@ outputs:
   plans-json:
     description: 'JSON array, one row per affected model: target, input, status, legal, blockers, warnings, summary, params, cost, and the deltas when a base was traced.'
     value: ${{ steps.bot.outputs.plans-json }}
+  fix-status:
+    description: '"none", "not-fixed", "opened", "updated", "push-failed" or "pr-failed".'
+    value: ${{ steps.fix.outputs.fix-status }}
+  fix-pr-number:
+    description: 'The number of the fix pull request, when one was opened or updated.'
+    value: ${{ steps.fix.outputs.fix-pr-number }}
+  fix-pr-url:
+    description: 'The URL of the fix pull request, when one was opened or updated.'
+    value: ${{ steps.fix.outputs.fix-pr-url }}
   issue-number:
     description: 'In report mode, the number of the weekly report issue that was created or updated.'
     value: ${{ steps.report.outputs.issue-number }}
@@ -189,6 +206,23 @@ runs:
           core.setOutput('issue-number', String(number));
           core.setOutput('issue-url', url);
           core.info(`neurarch-bot: ${url}`);
+
+    # The fix runs AFTER the comment is posted, on purpose: the plan is the product and it must
+    # reach the pull request whether or not a fix is possible. It talks to the plan step through
+    # a state file rather than step outputs, because a plan's blockers do not fit in one.
+    - name: Try to fix the blocker
+      id: fix
+      if: inputs.fix == 'true' && inputs.mode != 'report' && github.event.pull_request.number && steps.bot.outputs.blockers != '0' && steps.bot.outputs.blockers != ''
+      shell: bash
+      env:
+        NEURARCH_STAGE: fix
+        NEURARCH_STATE: ${{ steps.bot.outputs.state-path }}
+        INPUT_API_KEY: ${{ inputs.api-key }}
+        INPUT_GITHUB_TOKEN: ${{ inputs.github-token }}
+      run: |
+        # Never exit non-zero: a failed fix attempt is a line in the comment, not a second
+        # reason for the job to be red. The blocker itself fails it in the last step.
+        python "${{ github.action_path }}/scripts/bot.py" || echo "neurarch-bot: the fix step failed; the plan comment stands."
 
     # Report mode pins `fail` to false: findings are a record, not a gate. This step still runs
     # for a report that crashed outright, because a report that did not happen is a failure.

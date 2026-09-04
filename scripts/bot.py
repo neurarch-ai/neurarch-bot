@@ -20,6 +20,7 @@ import urllib.request
 from typing import Any, Dict, List, Optional, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import fix as fixmod  # noqa: E402
 import plan_request  # noqa: E402
 import report  # noqa: E402
 
@@ -83,8 +84,27 @@ def parse_models(config: Dict[str, Any]) -> List[Dict[str, Any]]:
             "extra_inputs": [str(x) for x in extra],
             "depth": m.get("depth"),
             "name": m.get("name"),
+            "policy": m.get("policy") if isinstance(m.get("policy"), dict) else None,
         })
     return out
+
+
+def parse_policy(config: Dict[str, Any], model: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The policy that applies to one model: the top-level block, then the model's own on top.
+
+    A repository has one set of house rules and, sometimes, a tighter line for one model (a
+    500K cap on the small classifier that a 10M transformer in the same config would fail by
+    construction). Merging per key rather than replacing wholesale is what makes the top-level
+    block usable at all: an entry that tightens one line does not silently drop the rest.
+    """
+    merged: Dict[str, Any] = {}
+    top = config.get("policy")
+    if isinstance(top, dict):
+        merged.update(top)
+    own = model.get("policy")
+    if isinstance(own, dict):
+        merged.update(own)
+    return merged or None
 
 
 def is_affected(model: Dict[str, Any], changed: List[str], listed_files: Optional[List[str]] = None) -> bool:
@@ -206,10 +226,12 @@ def slug(target: str) -> str:
 
 
 def process_model(model: Dict[str, Any], workspace: str, base_dir: Optional[str], tmp: str,
-                  pr: Optional[int], api_key: Optional[str]) -> Dict[str, Any]:
+                  pr: Optional[int], api_key: Optional[str],
+                  policy: Optional[Dict[str, Any]] = None,
+                  out_root: Optional[str] = None) -> Dict[str, Any]:
     entry: Dict[str, Any] = {"target": model["target"], "input": model["input"], "status": "planned",
                              "blockers": 0, "warnings": 0, "legal": True}
-    out_dir = os.path.join(tmp, "neurarch-bot", slug(model["target"]))
+    out_dir = os.path.join(out_root or os.path.join(tmp, "neurarch-bot"), slug(model["target"]))
     os.makedirs(out_dir, exist_ok=True)
     head_path = os.path.join(out_dir, "head.neurarch.json")
     log("tracing %s (input %s)" % (model["target"], model["input"]))
@@ -244,7 +266,8 @@ def process_model(model: Dict[str, Any], workspace: str, base_dir: Optional[str]
 
     source = plan_request.build_source(model["target"], " ".join([model["input"]] + model["extra_inputs"]), pr)
     try:
-        response = plan_request.request_plan(head_graph, base_graph, source, api_key=api_key)
+        response = plan_request.request_plan(head_graph, base_graph, source, api_key=api_key,
+                                             policy=policy)
     except plan_request.PlanRequestError as e:
         log("plan request failed for %s: %s" % (model["target"], e))
         entry.update({"status": "plan_failed", "error": str(e)})
@@ -349,12 +372,15 @@ def collect_drift(models: List[Dict[str, Any]], entries: List[Dict[str, Any]], w
 
 
 def run_report(models: List[Dict[str, Any]], workspace: str, tmp: str, api_key: Optional[str],
-               config_path: str, run_url: Optional[str], base_outputs: Dict[str, str]) -> int:
+               config_path: str, run_url: Optional[str], base_outputs: Dict[str, str],
+               policies: Optional[Dict[str, Any]] = None) -> int:
     """Report mode: every listed model at this commit, one issue body, no verdict on the job."""
+    policies = policies or {}
     previous = read_previous_report(os.environ.get("NEURARCH_PREVIOUS_REPORT"))
     log("planning all %d listed model(s) at the current commit: no base, no diff against a branch."
         % len(models))
-    entries = [process_model(m, workspace, None, tmp, None, api_key) for m in models]
+    entries = [process_model(m, workspace, None, tmp, None, api_key, policy=policies.get(m["target"]))
+               for m in models]
     drift = collect_drift(models, entries, workspace)
 
     commit = os.environ.get("GITHUB_SHA")
@@ -398,9 +424,314 @@ def run_report(models: List[Dict[str, Any]], workspace: str, tmp: str, api_key: 
     return 0
 
 
+# ---------------------------------------------------------------- fix stage
+
+
+def fix_state_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
+    """What the fix stage needs from a planned model, and nothing else.
+
+    The fix runs as a second step so the comment is already posted when it starts; the two
+    steps talk through this file rather than through the environment, because a plan's
+    blockers do not fit in a step output and a truncated blocker is a fix aimed at nothing.
+    """
+    plan = entry.get("plan") or {}
+    run = plan.get("run") or {}
+    findings = list(run.get("blockers") or [])
+    if not findings and entry.get("lint_findings"):
+        findings = [{"title": f.get("rule") or "finding", "detail": f.get("message"),
+                     "stage": "static"} for f in entry["lint_findings"] if f.get("severity") == "block"]
+    return {
+        "target": entry.get("target"),
+        "status": entry.get("status"),
+        "legal": entry.get("legal"),
+        "blockers": findings,
+        "summary": plan.get("summary"),
+        "params": (plan.get("model") or {}).get("params"),
+    }
+
+
+def plan_snapshot(entry: Dict[str, Any]) -> Dict[str, Any]:
+    """The three numbers the gate and the fix PR body compare on."""
+    plan = entry.get("plan") or {}
+    run = plan.get("run") or {}
+    return {
+        "status": entry.get("status"),
+        "error": (entry.get("error") or "").splitlines()[-1] if entry.get("error") else None,
+        "legal": bool(entry.get("legal")),
+        "summary": plan.get("summary"),
+        "params": (plan.get("model") or {}).get("params"),
+        "blockers": list(run.get("blockers") or []),
+        "findings": list(run.get("blockers") or []),
+    }
+
+
+def add_fix_worktree(workspace: str, head_sha: str, tmp: str) -> Optional[str]:
+    path = os.path.join(tmp, "neurarch-fix")
+    if os.path.isdir(path):
+        git(["worktree", "remove", "--force", path], workspace)
+        shutil.rmtree(path, ignore_errors=True)
+    r = git(["worktree", "add", "--detach", path, head_sha], workspace)
+    if r.returncode != 0:
+        log("could not check out the pull request head %s: %s" % (head_sha[:10], r.stderr.strip()))
+        return None
+    return path
+
+
+def read_files(root: str, paths: List[str]) -> List[Dict[str, str]]:
+    out = []
+    for rel in paths:
+        full = os.path.join(root, rel)
+        if not os.path.isfile(full):
+            continue
+        with open(full, "r", encoding="utf-8", errors="replace") as f:
+            out.append({"path": rel, "text": f.read()})
+    return out
+
+
+def exact_source(scratch: str, files: List[str]):
+    """Source 1: neurarch-mcp `suggest_fix` over stdio JSON-RPC. No model call, no key."""
+    def source(_findings):
+        patches: List[Dict[str, Any]] = []
+        reasons: List[str] = []
+        for rel in files:
+            if not os.path.isfile(os.path.join(scratch, rel)) or not rel.endswith(".py"):
+                continue
+            result = fixmod.mcp_suggest_fix(rel, scratch)
+            got, notes = fixmod.exact_patches(result, rel)
+            patches.extend(got)
+            reasons.extend(notes)
+        if patches:
+            return patches, ""
+        return [], ("no mechanical fix for these findings"
+                    + (" (%s)" % "; ".join(reasons[:3]) if reasons else ""))
+    return source
+
+
+def server_source(scratch: str, files: List[str], api_key: Optional[str],
+                  policy: Optional[Dict[str, Any]], allowed: List[str]):
+    """Source 2: `POST /api/v1/fix`. Metered against the key owner's quota, so it is skipped
+    outright when there is no key rather than called and refused."""
+    def source(findings):
+        if not api_key:
+            return [], fixmod.SKIPPED_NO_KEY
+        payload = read_files(scratch, files)
+        if not payload:
+            return [], "none of the listed model files are readable"
+        data = fixmod.request_fix(None, findings, payload, plan_request.api_base(), api_key,
+                                  policy=policy)
+        patches = [p for p in data.get("patches") or [] if isinstance(p, dict)]
+        ok, why = fixmod.patch_paths_allowed(patches, allowed)
+        if not ok:
+            return [], "the server proposed a patch this bot will not apply: %s" % why
+        if not patches:
+            return [], "the server had no patch for these findings (%s)" % (data.get("rationale") or "no rationale")
+        for p in patches:
+            p.setdefault("findingTitles", [])
+        return patches, ""
+    return source
+
+
+def run_fix(workspace: str, tmp: str, api_key: Optional[str]) -> int:
+    """Second step of PR mode: try to fix the blockers the first step found, and push only a
+    fix this bot's own gate accepted."""
+    out = {"fix-status": "none", "fix-line": "", "fix-branch": "", "fix-pr-url": "",
+           "fix-pr-number": "", "fix-comment-path": ""}
+    state_path = os.environ.get("NEURARCH_STATE") or os.path.join(tmp, "neurarch-bot-state.json")
+    token = (os.environ.get("INPUT_GITHUB_TOKEN") or "").strip()
+    repo = os.environ.get("GITHUB_REPOSITORY") or ""
+    if not os.path.isfile(state_path):
+        log("no state from the plan step; nothing to fix.")
+        write_outputs(out)
+        return 0
+    with open(state_path, "r", encoding="utf-8") as f:
+        state = json.load(f)
+    pr = state.get("pr")
+    head_sha = state.get("head_sha")
+    if not pr or not head_sha or not token or not repo:
+        log("fix needs a pull request, its head sha, a github-token and a repository; skipping.")
+        write_outputs(out)
+        return 0
+
+    blocked = [e for e in state.get("entries") or [] if e.get("blockers")]
+    if not blocked:
+        log("no blockers to fix.")
+        write_outputs(out)
+        return 0
+    if len(blocked) > 1:
+        log("%d models are blocked; fixing the first, %s." % (len(blocked), blocked[0]["target"]))
+    entry = blocked[0]
+    target = entry["target"]
+    model = next((m for m in state.get("models") or [] if m.get("target") == target), None)
+    if model is None:
+        log("the blocked model is not in the config any more; skipping.")
+        write_outputs(out)
+        return 0
+    listed = [m["file"] for m in state.get("models") or []]
+    policy = (state.get("policies") or {}).get(target)
+
+    scratch = add_fix_worktree(workspace, head_sha, tmp)
+    if scratch is None:
+        write_outputs(out)
+        return 0
+
+    def reset():
+        git(["checkout", "--", "."], scratch)
+        git(["clean", "-fd"], scratch)
+
+    def apply_fn(patches):
+        ok, err = fixmod.patch_paths_allowed(patches, listed)
+        if not ok:
+            return False, err
+        return fixmod.apply_patches(patches, scratch)
+
+    def verify():
+        result = process_model(model, scratch, None, tmp, pr, api_key, policy=policy,
+                               out_root=os.path.join(tmp, "neurarch-fix-plan"))
+        snap = plan_snapshot(result)
+        log("re-planned %s: legal=%s params=%s blockers=%d" % (
+            target, snap["legal"], snap["params"], len(snap["blockers"])))
+        return snap
+
+    sources = [
+        ("the exact patch from neurarch-mcp `suggest_fix`", exact_source(scratch, [model["file"]])),
+        ("a proposal from `POST /api/v1/fix`", server_source(scratch, listed, api_key, policy, listed)),
+    ]
+    before = {"summary": entry.get("summary"), "params": entry.get("params"),
+              "blockers": entry.get("blockers")}
+    outcome = fixmod.run_fix_rounds(entry["blockers"], sources, apply_fn, verify,
+                                    reference_params=entry.get("params"), reset_fn=reset)
+
+    skipped = ["The %s." % fixmod.SKIPPED_NO_KEY[len("the "):]] if not api_key else []
+    if not outcome["accepted"]:
+        remove_worktree(workspace, scratch)
+        line = fixmod.failure_line(outcome["reason"], skipped=None)
+        log("no fix pushed: %s" % outcome["reason"])
+        out.update({"fix-status": "not-fixed", "fix-line": line})
+        write_outputs(out)
+        post_fix_line(token, repo, pr, line)
+        return 0
+
+    branch = fixmod.branch_name(pr)
+    body = fixmod.fix_pr_body(pr, target, before, outcome["after"], outcome["source"],
+                              outcome["patches"], outcome["rounds"], __version__,
+                              notes=outcome["notes"], skipped=skipped)
+    pushed = push_fix_branch(scratch, workspace, repo, token, branch, pr, target)
+    remove_worktree(workspace, scratch)
+    if not pushed:
+        line = fixmod.failure_line("the fix passed the gate but the branch could not be pushed "
+                                   "(does the token carry `contents: write`?)")
+        out.update({"fix-status": "push-failed", "fix-line": line})
+        write_outputs(out)
+        post_fix_line(token, repo, pr, line)
+        return 0
+
+    try:
+        pr_number, pr_url, updated = open_or_update_fix_pr(token, repo, branch, pr, state, body)
+    except fixmod.FixError as e:
+        log("could not open the fix pull request: %s" % e)
+        line = fixmod.failure_line("the fix passed the gate and `%s` was pushed, but the pull "
+                                   "request could not be opened (%s)" % (branch, e))
+        out.update({"fix-status": "pr-failed", "fix-branch": branch, "fix-line": line})
+        write_outputs(out)
+        post_fix_line(token, repo, pr, line)
+        return 0
+
+    line = fixmod.success_line(pr_number, pr_url, outcome["source"], before.get("params"),
+                               (outcome["after"] or {}).get("params"), updated=updated)
+    out.update({"fix-status": "updated" if updated else "opened", "fix-branch": branch,
+                "fix-pr-number": str(pr_number), "fix-pr-url": pr_url, "fix-line": line})
+    write_outputs(out)
+    post_fix_line(token, repo, pr, line)
+    log("fix pull request %s: %s" % ("updated" if updated else "opened", pr_url))
+    return 0
+
+
+def push_fix_branch(scratch: str, workspace: str, repo: str, token: str, branch: str,
+                    pr: int, target: str) -> bool:
+    git(["config", "user.name", "neurarch-bot"], scratch)
+    git(["config", "user.email", "neurarch-bot@users.noreply.github.com"], scratch)
+    git(["add", "-A"], scratch)
+    message = "fix: resolve the blocker neurarch-bot found on #%d\n\nModel: %s\n" % (pr, target)
+    r = git(["commit", "-m", message], scratch)
+    if r.returncode != 0:
+        log("nothing to commit for the fix branch: %s" % (r.stdout or r.stderr).strip())
+        return False
+    server = os.environ.get("GITHUB_SERVER_URL") or "https://github.com"
+    remote = "%s/%s.git" % (server.rstrip("/"), repo)
+    remote = remote.replace("https://", "https://x-access-token:%s@" % token, 1)
+    r = git(["push", "--force", remote, "HEAD:refs/heads/%s" % branch], scratch)
+    if r.returncode != 0:
+        log("push failed: %s" % _scrub(r.stderr.strip(), token))
+        return False
+    return True
+
+
+def _scrub(text: str, token: str) -> str:
+    return text.replace(token, "***") if token else text
+
+
+def open_or_update_fix_pr(token: str, repo: str, branch: str, pr: int,
+                          state: Dict[str, Any], body: str) -> Tuple[int, str, bool]:
+    """Open the fix pull request, or update the one already open for this branch.
+
+    Never a second pull request for the same original: the branch name is derived from the PR
+    number, so a re-run pushes the same branch and this finds the pull request already on it.
+    """
+    owner = repo.split("/")[0]
+    open_prs = fixmod.gh_request("GET", "/repos/%s/pulls?state=open&head=%s:%s&per_page=100"
+                                 % (repo, owner, branch), token) or []
+    existing = fixmod.existing_fix_pr(open_prs, branch)
+    title = "Fix the blocker in #%d" % pr
+    if existing:
+        fixmod.gh_request("PATCH", "/repos/%s/pulls/%d" % (repo, existing["number"]), token,
+                          {"title": title, "body": body})
+        return int(existing["number"]), str(existing.get("html_url") or ""), True
+    head_ref = state.get("head_ref") or _head_ref_from_event()
+    if not head_ref:
+        raise FixNoHeadRef("the pull request's head branch name is not in the event payload")
+    created = fixmod.gh_request("POST", "/repos/%s/pulls" % repo, token, {
+        "title": title, "body": body, "head": branch, "base": head_ref, "maintainer_can_modify": True})
+    if not isinstance(created, dict) or not created.get("number"):
+        raise fixmod.FixError("GitHub did not return the new pull request")
+    return int(created["number"]), str(created.get("html_url") or ""), False
+
+
+class FixNoHeadRef(fixmod.FixError):
+    pass
+
+
+def _head_ref_from_event() -> Optional[str]:
+    path = os.environ.get("GITHUB_EVENT_PATH")
+    if not path or not os.path.isfile(path):
+        return None
+    with open(path, "r", encoding="utf-8") as f:
+        event = json.load(f)
+    return ((event.get("pull_request") or {}).get("head") or {}).get("ref")
+
+
+def post_fix_line(token: str, repo: str, pr: int, line: str) -> None:
+    """Add the one fix line to the plan comment the previous step posted."""
+    try:
+        comments = fixmod.gh_request("GET", "/repos/%s/issues/%d/comments?per_page=100" % (repo, pr),
+                                     token) or []
+        target = next((c for c in comments if isinstance(c, dict)
+                       and str(c.get("body") or "").startswith(plan_request.MARKER)), None)
+        if target is None:
+            log("no plan comment to add the fix line to.")
+            return
+        body = fixmod.comment_with_fix_line(str(target.get("body") or ""), line)
+        fixmod.gh_request("PATCH", "/repos/%s/issues/comments/%d" % (repo, target["id"]), token,
+                          {"body": body})
+        log("added the fix line to comment %s" % target["id"])
+    except fixmod.FixError as e:
+        log("could not update the plan comment with the fix line: %s" % e)
+
+
 def main() -> int:
     workspace = os.environ.get("GITHUB_WORKSPACE") or os.getcwd()
     tmp = os.environ.get("RUNNER_TEMP") or tempfile.gettempdir()
+    if (os.environ.get("NEURARCH_STAGE") or "").strip().lower() == "fix":
+        return run_fix(workspace, tmp, (os.environ.get("INPUT_API_KEY") or "").strip() or None)
     mode = (os.environ.get("INPUT_MODE") or "pr").strip().lower()
     if mode not in ("pr", "report"):
         raise SystemExit("neurarch-bot: `mode` must be `pr` or `report`, not `%s`" % mode)
@@ -427,7 +758,7 @@ def main() -> int:
     base_outputs = {"legal": "true", "blockers": "0", "warnings": "0", "plans-json": "[]",
                     "fail": "false", "comment": "none", "comment-path": comment_path, "affected": "0",
                     "report": "none", "report-body-path": "", "report-comment-path": "",
-                    "report-title": report.TITLE}
+                    "report-title": report.TITLE, "state-path": ""}
 
     config = load_config(config_path)
     if config is None:
@@ -442,14 +773,27 @@ Add a .neurarch.yml at the repository root listing the models to plan on every p
       input: 1,3,32,32
 
 Optional per model: extra_inputs (a list of more --input specs for multi-input forwards),
-depth (stop descending at this module depth), name.
+depth (stop descending at this module depth), name, policy (this model's own house rules).
+
+A top-level `policy:` block applies to every model and turns the organisation's own lines
+into blockers and warnings in the same plan:
+
+  policy:
+    max_params: 200M
+    must_fit: A100-40GB
+    forbid_types: [softmax]
 """)
         write_outputs(base_outputs)
         return 0
 
     models = parse_models(config)
+    policies = {m["target"]: parse_policy(config, m) for m in models}
+    for target, pol in policies.items():
+        if pol:
+            log("policy for %s: %s" % (target, json.dumps(pol, sort_keys=True)))
     if mode == "report":
-        return run_report(models, workspace, tmp, api_key, config_path, run_url, base_outputs)
+        return run_report(models, workspace, tmp, api_key, config_path, run_url, base_outputs,
+                          policies=policies)
 
     if not pr or not base_sha or not head_sha:
         log("not a pull_request event (no base/head sha); planning every listed model against no base.")
@@ -476,7 +820,8 @@ depth (stop descending at this module depth), name.
     entries: List[Dict[str, Any]] = []
     try:
         for m in affected:
-            entries.append(process_model(m, workspace, base_dir, tmp, pr, api_key))
+            entries.append(process_model(m, workspace, base_dir, tmp, pr, api_key,
+                                         policy=policies.get(m["target"])))
     finally:
         remove_worktree(workspace, base_dir)
 
@@ -499,6 +844,14 @@ depth (stop descending at this module depth), name.
         with open(summary_path, "a", encoding="utf-8") as f:
             f.write(body.replace(plan_request.MARKER + "\n", "", 1))
 
+    state_path = os.path.join(tmp, "neurarch-bot-state.json")
+    with open(state_path, "w", encoding="utf-8") as f:
+        json.dump({"pr": pr, "head_sha": head_sha, "base_sha": base_sha,
+                   "config": os.environ.get("INPUT_CONFIG") or ".neurarch.yml",
+                   "head_ref": (pr_obj.get("head") or {}).get("ref"),
+                   "models": affected, "policies": policies,
+                   "entries": [fix_state_entry(e) for e in entries]}, f)
+
     write_outputs({
         "legal": "true" if legal else "false",
         "blockers": str(blockers),
@@ -508,6 +861,7 @@ depth (stop descending at this module depth), name.
         "comment": comment_mode,
         "comment-path": comment_path,
         "affected": str(len(entries)),
+        "state-path": state_path,
     })
     log("%d model(s) planned: %d blocker(s), %d warning(s), legal=%s, fail=%s" % (
         len(entries), blockers, warnings, legal, fail))

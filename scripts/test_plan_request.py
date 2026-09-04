@@ -104,6 +104,17 @@ class PlanRequestTests(unittest.TestCase):
         self.assertEqual(req["headers"]["User-Agent"], "neurarch-bot/%s" % plan_request.__version__)
         self.assertEqual(resp["plan"]["model"]["name"], "WideCNN")
 
+    def test_policy_rides_on_the_same_call_and_is_absent_when_empty(self):
+        source = plan_request.build_source("m.py:M", "1,3,32,32", pr=1)
+        plan_request.request_plan(GRAPH, None, source, api=self.api,
+                                  policy={"max_params": "500K", "forbid_types": ["softmax"]})
+        self.assertEqual(self.last_request()["body"]["policy"],
+                         {"max_params": "500K", "forbid_types": ["softmax"]})
+        plan_request.request_plan(GRAPH, None, source, api=self.api, policy=None)
+        self.assertNotIn("policy", self.last_request()["body"])
+        plan_request.request_plan(GRAPH, None, source, api=self.api, policy={})
+        self.assertNotIn("policy", self.last_request()["body"])
+
     def test_no_base_means_no_base_field(self):
         source = plan_request.build_source("m.py:M", "1,8:long", pr=None)
         plan_request.request_plan(GRAPH, None, source, api=self.api)
@@ -233,6 +244,22 @@ class AffectedTests(unittest.TestCase):
 
     def test_unrelated(self):
         self.assertFalse(self.bot.is_affected(self.gpt, ["README.md", ".neurarch.yml", "train/run.py"], self.listed))
+
+    def test_policy_merges_the_top_level_block_with_the_model_s_own(self):
+        cfg = {"policy": {"forbid_types": ["softmax"], "max_params": "200M"},
+               "models": [{"path": "models/small_cnn.py:SmallCNN", "input": "1,3,32,32",
+                           "policy": {"max_params": "500K"}},
+                          {"path": "models/tiny_gpt.py:TinyGPT", "input": "1,32:long"}]}
+        cnn, gpt = self.bot.parse_models(cfg)
+        # Per key, not wholesale: the tighter cap on the CNN keeps the house rule about softmax.
+        self.assertEqual(self.bot.parse_policy(cfg, cnn),
+                         {"forbid_types": ["softmax"], "max_params": "500K"})
+        self.assertEqual(self.bot.parse_policy(cfg, gpt),
+                         {"forbid_types": ["softmax"], "max_params": "200M"})
+
+    def test_no_policy_anywhere_is_none(self):
+        cfg = {"models": [{"path": "models/x.py:X", "input": "1,3,32,32"}]}
+        self.assertIsNone(self.bot.parse_policy(cfg, self.bot.parse_models(cfg)[0]))
 
     def test_config_parse(self):
         cfg = {"models": [{"path": "models/tiny_gpt.py:TinyGPT", "input": "1,32:long", "depth": 2,

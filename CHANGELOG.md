@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.0 (2026-09-03)
+
+- **New `fix` input.** On a blocker, the bot patches the model, verifies its own work, and opens a pull request. It runs after the plan comment is posted, because the plan reaches the pull request whether or not a fix turns out to be possible.
+- **Two sources of patches, in order.** The **exact patch** comes from `suggest_fix` in `neurarch-mcp`: it reads the `.py`, lints it and returns a unified diff for the rules that pin a number or an order, at no model call and no key. That CLI has no one-shot `suggest_fix` subcommand, so the bot speaks the server's stdio JSON-RPC directly (two writes, two reads, standard library, no MCP client library on the runner). The **proposal** comes from `POST /api/v1/fix`, which is metered against the API key owner's agent quota and is therefore **skipped outright when no `api-key` is set**, with the comment saying the source was skipped rather than pretending it was tried.
+- **Nothing is pushed that the bot's own gate has not accepted.** The patch is applied to a scratch worktree at the pull request's head, the model is traced again and planned again, and the result is accepted only if the new plan is legal AND the parameter count is within 10 percent of that head. A "fix" that deletes half the model turns every blocker green and is not a fix. Up to 3 rounds, feeding the remaining findings back in; a round that reduces the blocker count is kept and built on, a round that does not is thrown away.
+- **The fix pull request goes into the original pull request's head branch**, not the default branch: the fix belongs on top of the change that broke it. Branch `neurarch/fix-pr<N>`, title `Fix the blocker in #<N>`, body carrying both plans side by side and naming which source produced the patch. One line is added to the plan comment linking it; on failure, one line saying what was tried and why it was rejected.
+- **Never a second fix pull request for the same original.** The branch name is derived from the pull request number, so a re-run pushes the same branch and updates the pull request already open on it.
+- **A patch is refused before it is applied** if it targets a file `.neurarch.yml` does not list, is absolute, or climbs out of the repository. The bot has a write token; the allowlist is the config's own model files and nothing else.
+- New `github-token` input, defaulting to `${{ github.token }}`. A pull request opened with the default token **does not trigger workflows**, so the fix pull request arrives with no bot check of its own; pass a PAT to get one.
+- **New `policy:` block in `.neurarch.yml`**, sent with every plan: `max_params`, `must_fit`, `max_layers`, `forbid_types` and `require_types` are blockers, `max_memory_gb` and `max_cost_usd` are warnings, each quoted as you wrote it. A model's own `policy` merges over the top-level one key by key, so tightening one line does not drop the rest. It needs no API key, because a policy can only make the verdict stricter.
+- New outputs `fix-status`, `fix-pr-number`, `fix-pr-url`.
+
 ## 0.2.0 (2026-09-03)
 
 - New `mode` input. The default `pr` is unchanged. `mode: report` traces **every** model in the config at the current commit, with no base and no diff against a branch, and upserts one issue titled `Neurarch weekly model report`.

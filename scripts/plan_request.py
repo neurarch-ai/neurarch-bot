@@ -13,7 +13,7 @@ import urllib.request
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlsplit
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 DEFAULT_API = "https://www.neurarch.com"
 PLAN_PATH = "/api/v1/plan"
@@ -64,16 +64,21 @@ def request_plan(
     api: Optional[str] = None,
     api_key: Optional[str] = None,
     timeout: float = TIMEOUT_SECONDS,
+    policy: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """POST `{model, base?, share: false, source}` and return the decoded response.
+    """POST `{model, base?, policy?, share: false, source}` and return the decoded response.
 
-    Nothing is ever shared publicly from the bot: `share` is pinned to false.
+    Nothing is ever shared publicly from the bot: `share` is pinned to false. `policy` is the
+    organisation's own `.neurarch.yml` lines; it needs no API key, because a policy can only
+    make the verdict stricter and never more permissive.
     """
     api = (api or api_base()).rstrip("/")
     host = api_host(api)
     body: Dict[str, Any] = {"model": model, "share": False, "source": source}
     if base is not None:
         body["base"] = base
+    if policy:
+        body["policy"] = policy
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json",
