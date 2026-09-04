@@ -27,6 +27,7 @@ import os
 import re
 import socket
 import subprocess
+import threading
 import urllib.error
 import urllib.request
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
@@ -158,26 +159,69 @@ def mcp_suggest_fix(py_path: str, cwd: str, timeout: int = MCP_TIMEOUT,
     """Call `suggest_fix` on one .py over the MCP server's stdio JSON-RPC.
 
     No MCP client library: the transport is newline-delimited JSON-RPC on stdin/stdout, which
-    is two writes and two reads. `severity: info` asks for every finding rather than the
+    is two writes and two reads.  `severity: info` asks for every finding rather than the
     default floor, because the gate downstream re-verifies anyway and a finding we refused to
     even look at cannot be fixed.
+
+    The answer is read as it arrives and the server is killed the moment it lands. Waiting for
+    the process to exit instead cost a whole run: a stdio server is allowed to sit there after
+    it has answered, and `communicate()` waits for EOF, so a call that had already succeeded
+    was reported as a timeout.
     """
     cmd = ["npx", "-y", package or MCP_PACKAGE, py_path, "--tools=full"]
     try:
         proc = subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE, text=True)
+                                stderr=subprocess.PIPE, text=True, bufsize=1)
     except (OSError, ValueError) as e:
         raise FixError("could not start neurarch-mcp (%s); is node on the runner?" % e)
+
+    lines: List[str] = []
+    answer: Dict[str, Any] = {}
+    done = threading.Event()
+
+    def pump():
+        try:
+            for line in proc.stdout:  # type: ignore[union-attr]
+                lines.append(line)
+                found = _mcp_result(line, 2)
+                if found is not None:
+                    answer.update(found)
+                    done.set()
+                    return
+                if _is_error_for(line, 2):
+                    done.set()
+                    return
+        finally:
+            done.set()
+
+    reader = threading.Thread(target=pump, daemon=True)
+    reader.start()
     try:
-        out, err = proc.communicate(_mcp_requests(), timeout=timeout)
-    except subprocess.TimeoutExpired:
+        proc.stdin.write(_mcp_requests())  # type: ignore[union-attr]
+        proc.stdin.flush()  # type: ignore[union-attr]
+    except (BrokenPipeError, OSError) as e:
         proc.kill()
+        raise FixError("neurarch-mcp closed its input (%s)" % e)
+    finished = done.wait(timeout)
+    proc.kill()
+    if not finished:
         raise FixError("neurarch-mcp did not answer within %ds" % timeout)
-    result = _mcp_result(out, 2)
-    if result is None:
-        tail = "\n".join((err or out or "").rstrip().splitlines()[-3:])
+    if not answer:
+        tail = "\n".join("".join(lines).rstrip().splitlines()[-3:])
         raise FixError("neurarch-mcp returned no suggest_fix result (%s)" % (tail or "no output"))
-    return result
+    return answer
+
+
+def _is_error_for(line: str, want_id: int) -> bool:
+    """A JSON-RPC error for our call: stop waiting, there is no answer coming."""
+    line = line.strip()
+    if not line.startswith("{"):
+        return False
+    try:
+        msg = json.loads(line)
+    except ValueError:
+        return False
+    return msg.get("id") == want_id and "error" in msg
 
 
 def _mcp_requests() -> str:

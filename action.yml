@@ -88,6 +88,18 @@ runs:
         restore-keys: |
           neurarch-bot-${{ runner.os }}-py${{ inputs.python-version }}-
 
+    # The exact-patch source runs `npx neurarch-mcp`, which downloads the package on a cold
+    # runner. Cached, the whole call is a couple of seconds; uncached it is the slowest thing
+    # in the fix step.
+    - name: Cache npm (neurarch-mcp for the exact patch)
+      if: inputs.fix == 'true' && inputs.mode != 'report'
+      uses: actions/cache@v4
+      with:
+        path: ~/.npm
+        key: neurarch-bot-npm-${{ runner.os }}-neurarch-mcp
+        restore-keys: |
+          neurarch-bot-npm-${{ runner.os }}-
+
     - name: Install torch and neurarch-trace
       shell: bash
       run: |

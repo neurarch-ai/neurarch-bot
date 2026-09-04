@@ -301,6 +301,42 @@ class RoundTests(unittest.TestCase):
 
 # ---------------------------------------------------------------- suggest_fix parsing
 
+# A stand-in for `npx neurarch-mcp <file.py>`: it answers the two requests and then SITS THERE.
+# A stdio server is allowed not to exit after it has answered, which is what turned a call that
+# had already succeeded into a reported timeout on the first live run. This reproduces that.
+FAKE_MCP = "PATCH = %r\n" % PATCH_TWO + """import json, sys, time
+sys.stdin.readline()
+print(json.dumps({"jsonrpc": "2.0", "id": 1, "result": {"serverInfo": {"name": "neurarch-mcp"}}}), flush=True)
+sys.stdin.readline()
+sys.stdin.readline()
+print(json.dumps({"jsonrpc": "2.0", "id": 2, "result": {"structuredContent": {
+    "path": "small_cnn.py", "fixes": [{"rule": "output-activation", "confidence": "proposal",
+    "diff": PATCH, "summary": "Drop the softmax call at the output."}], "notFixable": []}}}), flush=True)
+time.sleep(600)"""
+
+
+class McpSubprocessTests(unittest.TestCase):
+    def test_the_answer_is_taken_the_moment_it_lands_not_when_the_server_exits(self):
+        d = tempfile.mkdtemp()
+        script = os.path.join(d, "fake_mcp.py")
+        with open(script, "w") as f:
+            f.write(FAKE_MCP)
+        real = fix.subprocess.Popen
+
+        def popen(cmd, **kw):
+            return real([sys.executable, script], **kw)
+
+        fix.subprocess.Popen = popen
+        try:
+            result = fix.mcp_suggest_fix("models/small_cnn.py", d, timeout=20)
+        finally:
+            fix.subprocess.Popen = real
+        self.assertEqual(result["path"], "small_cnn.py")
+        patches, _ = fix.exact_patches(result, "models/small_cnn.py")
+        self.assertEqual(len(patches), 1)
+        self.assertTrue(patches[0]["diff"].startswith("--- models/small_cnn.py"))
+
+
 class McpParsingTests(unittest.TestCase):
     def test_the_structured_result_is_picked_out_of_the_stream(self):
         stream = "\n".join([
