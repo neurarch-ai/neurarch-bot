@@ -1,0 +1,2 @@
+3cd3734fa624ecd06526c5962b8496865d3c0f89
+neurarch lib/modelPlan.bundle.mjs at this commit (origin/main 4ee27519 carries the same file). Rebuild: npm run build:plan in neurarch, then copy lib/modelPlan.bundle.mjs here.
