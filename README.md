@@ -4,7 +4,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 [![Try Neurarch](https://img.shields.io/badge/Neurarch-try_it-7c3aed)](https://neurarch.com/bot)
 
-**Dependabot for models.** On every pull request that touches a model, neurarch-bot traces the model on your branch and on the base branch, and posts one comment saying what changed: params, cost, GPU fit, and whether the thing will run at all. A blocker turns the check red, so a model that cannot forward-pass never reaches a GPU. With `fix: true` it goes one step further and opens a pull request with the fix, but only one its own gate accepted: see [It opens the fix](#it-opens-the-fix). Comment `/neurarch train` on the pull request and it runs the model on a real GPU and posts the curve back: see [`/neurarch train`](#neurarch-train). On a schedule, it keeps one issue up to date with every model you own: see [Weekly report](#weekly-report).
+**Your jobs ask for more GPU than they need. Know before the reservation.** On every pull request that touches a model or its training config, neurarch-bot traces the model on your branch and on the base branch and posts one comment that opens with the number the GPU bill depends on: the training peak at the batch and sequence length the job actually runs at, whether that still fits the card the job reserves, what moved versus the base, the largest batch that fits that card, the smallest card that holds the job, and what it costs. A job that no longer fits its card turns the check red, and so does a structural blocker (a model that cannot forward-pass), so neither reaches a GPU. With `fix: true` it goes one step further and opens a pull request with the fix, but only one its own gate accepted: see [It opens the fix](#it-opens-the-fix). Comment `/neurarch train` on the pull request and it runs the model on a real GPU and posts the curve back: see [`/neurarch train`](#neurarch-train). On a schedule, it keeps one issue up to date with every model you own: see [Weekly report](#weekly-report).
 
 It reads your model the way the runtime does, by importing it and tracing a forward pass, so the numbers are the real ones and not a guess made from the text of the file.
 
@@ -42,7 +42,28 @@ models:
     input: 1,3,32,32
 ```
 
-Per model you may also set `extra_inputs` (a list of further `--input` specs, for a forward that takes more than one tensor), `depth` (stop descending at this module depth), `name`, and `policy`.
+Per model you may also set `extra_inputs` (a list of further `--input` specs, for a forward that takes more than one tensor), `depth` (stop descending at this module depth), `name`, `policy`, and `job`.
+
+### The job: what the training run reserves
+
+`job:` is what turns the comment from "a model changed" into "this run still fits its card". Set it per model, or once at the top level for every model:
+
+```yaml
+models:
+  - path: models/doc_lm.py:DocLM
+    input: "1,32:long"                          # traced short on a CPU runner
+    job:
+      gpu: A10G                                 # the card the training job reserves
+      batch: configs/pretrain.yaml:batch_size   # a number, or file:key read at each commit
+      seq_len: configs/pretrain.yaml:seq_len    # token models: the length it trains at
+      grad_accum: configs/pretrain.yaml:grad_accum
+      epochs: 3                                 # optional, for the cost line
+      samples: 400000                           # optional, for the cost line (else 50,000, said so)
+```
+
+A `file:key` reference (YAML or JSON, dotted keys allowed) is read from your own training config at the commit being planned, on both sides of the pull request. So the numbers cannot drift from the job that will be submitted, a pull request that only raises `batch_size` is planned like a model change, and the base is sized at the batch it actually had. `gpu` takes `T4`, `L4`, `A10G`, `L40S`, `A100 40GB`, `A100 80GB` or `H100` (case and punctuation do not matter). With no `job:` the comment still leads with the peak at batch 32 and says how to name the card.
+
+The memory, the largest batch and the cost are computed on the runner by the same plan arithmetic the hosted plan uses (`scripts/vendor/modelPlan.bundle.mjs`, vendored from neurarch, AdamW with bf16 autocast, 1.15x allocator headroom), so the check needs no extra network call for them. They are estimates; the footer says so.
 
 [**`examples/.neurarch.yml`**](./examples/.neurarch.yml) is every supported key, annotated: what each one blocks, what each one warns on, and a worked example of each. Copy it and delete what you do not want.
 
@@ -118,18 +139,24 @@ A pull request affects a listed model when the listed file changed, or when any 
 
 ## What the comment looks like
 
-> ### `models/small_cnn.py:SmallCNN` :white_check_mark: will run
+> ### `models/doc_lm.py:DocLM` :no_entry: no longer fits A10G 24 GB · :white_check_mark: will run
 >
-> **SmallCNN: 21 layers, 971.9K params, will run, fits a T4, about $0.05 to train, vs SmallCNN: params +830.6K**
+> **Peak training memory: 38.4 GB** at batch 32 x 2,048 tokens (weights and optimizer state 2.7 GB, activations 35.7 GB).
 >
-> | | |
-> |---|---|
-> | Layers / params | 21 / 971.9K (+830.6K, +588%) |
-> | Shape | `[3,32,32]` -> `[10]` |
-> | Will it run | yes, 0 warnings |
-> | GPU fit | T4 yes · A100 40GB yes · H100 80GB yes (memory +0.01 GB) |
-> | Est. training | ~$0.05 / 3m on A10G (24GB) (+<$0.01) |
-> | Blast radius | 10 downstream layers from 5 touched |
+> - **Reserved card: A10G 24 GB. Does not fit**: the job needs 44.2 GB with the 1.15x allocator headroom, and the card has 24 GB.
+> - **vs base:** +17.8 GB (base 20.6 GB at batch 32 x 1,024 tokens), **no longer fits A10G 24 GB**.
+> - **Largest batch that fits A10G 24 GB:** 16 at 2,048 tokens. Batch 16 with 2 gradient-accumulation steps keeps the effective batch at 32.
+> - **Smallest card that holds it:** L40S 48 GB.
+> - **Cost:** about $16.34 and 8.4 h on L40S 48 GB for 3 epochs over 400,000 samples, priced on the card that holds it.
+>
+> **Structural checks.** Will it run: yes, 0 warnings. 113 layers, 135.8M params (+786.4K vs base).
+>
+> **Changes vs DocLM** (+0 -0 ~1, 112 downstream layers)
+> ```
+> ~ pos_emb.vocabSize 1024 -> 2048
+> ```
+
+Memory first, structure second. The first block is the job against its card; the second is whether the graph runs at all, the findings, your house rules and the per-field diff. A job that does not fit its reserved card fails the check (set `fail-on-no-fit: false` to only report it), and a structural blocker fails it regardless.
 
 One comment per pull request, carrying one section per affected model. It is upserted on every push, so it follows your commits instead of piling up.
 
@@ -392,6 +419,7 @@ Four things worth knowing:
 | `fix` | `false` | On a blocker, patch the model, re-trace, re-plan, and open a fix pull request if the new plan is legal and the parameter count is within 10 percent of the head. Needs `contents: write`. |
 | `github-token` | `${{ github.token }}` | Token used to push the fix branch, open the fix pull request and add one line to the plan comment. A pull request opened with the default token gets no workflow run; pass a PAT to get one. |
 | `timeout-min` | `20` | Train mode only. Minutes to keep polling the run and editing the comment. When it runs out the comment says the run is still going and how to poll it; the run is not cancelled and the job stays green. |
+| `fail-on-no-fit` | `true` | Fail the check when a model's training peak, at its job's batch and sequence length, does not fit the card `job.gpu` reserves. `false` keeps the comment and the check green. Models with no `job.gpu` never fail on memory. |
 | `fail-on-warn` | `false` | Fail the check on warnings, not just blockers. Ignored in report mode, which never fails on findings. |
 | `comment-on-clean` | `false` | Post a comment even when the traced structure is identical to the base and has no findings. An existing comment is updated either way. |
 | `python-version` | `3.11` | Python used to import the model and run the trace. |
@@ -404,7 +432,8 @@ Four things worth knowing:
 | `legal` | `true` when every affected model will run. |
 | `blockers` | Total blockers across affected models. |
 | `warnings` | Total warnings across affected models. |
-| `plans-json` | JSON array, one row per affected model: target, input, status, legal, blockers, warnings, summary, params, cost, and the deltas when a base was traced. |
+| `fits` | `false` when any affected model does not fit the card its job reserves, `true` when every sized model fits, empty when no job names a card. |
+| `plans-json` | JSON array, one row per affected model: target, input, status, legal, blockers, warnings, summary, params, cost, the deltas when a base was traced, and the job sizing (`peakGb`, `batch`, `seqLen`, `reservedGpu`, `fitsReserved`, `maxBatch`, `smallestFitGpu`, `peakDeltaGb`). |
 | `fix-status` | `none`, `not-fixed`, `opened`, `updated`, `push-failed` or `pr-failed`. |
 | `fix-pr-number` | The number of the fix pull request, when one was opened or updated. |
 | `fix-pr-url` | The URL of the fix pull request. |
@@ -418,7 +447,7 @@ Four things worth knowing:
 
 ## Privacy
 
-The traced graph leaves your repository: layer structure and shapes only, never weights and never data. Nothing is published unless you ask.
+The traced graph leaves your repository for the structural checks: layer structure and shapes only, never weights and never data. Nothing is published unless you ask. The job sizing (memory, batch, card, cost) runs on the runner and sends nothing.
 
 `/neurarch train` sends the traced graph and the dataset name, and nothing else; the data is one of the three public datasets the endpoint offers and never comes from your repository.
 

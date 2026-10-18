@@ -1,0 +1,1542 @@
+{
+  "id": "traced-TinyGPT",
+  "name": "TinyGPT",
+  "description": "Traced by neurarch-trace 0.2.0 from models/tiny_gpt.py:TinyGPT with input 1,32:long",
+  "components": [
+    {
+      "id": "input",
+      "type": "input",
+      "name": "input",
+      "position": {
+        "x": 0,
+        "y": 0
+      },
+      "params": {
+        "shape": [
+          32
+        ]
+      },
+      "inputs": [],
+      "outputs": [
+        "tok_emb",
+        "pos_emb"
+      ],
+      "outputShape": [
+        32
+      ]
+    },
+    {
+      "id": "tok_emb",
+      "type": "embedding",
+      "name": "tok_emb",
+      "position": {
+        "x": 0,
+        "y": 100
+      },
+      "params": {
+        "vocabSize": 8192,
+        "embeddingDim": 384
+      },
+      "inputs": [
+        "input"
+      ],
+      "outputs": [
+        "add"
+      ],
+      "inputShape": [
+        32
+      ],
+      "outputShape": [
+        32,
+        384
+      ]
+    },
+    {
+      "id": "pos_emb",
+      "type": "embedding",
+      "name": "pos_emb",
+      "position": {
+        "x": 0,
+        "y": 200
+      },
+      "params": {
+        "vocabSize": 256,
+        "embeddingDim": 384
+      },
+      "inputs": [
+        "input"
+      ],
+      "outputs": [
+        "add"
+      ],
+      "inputShape": [],
+      "outputShape": [
+        384
+      ]
+    },
+    {
+      "id": "add",
+      "type": "add",
+      "name": "add",
+      "position": {
+        "x": 0,
+        "y": 300
+      },
+      "params": {},
+      "inputs": [
+        "tok_emb",
+        "pos_emb"
+      ],
+      "outputs": [
+        "drop"
+      ],
+      "inputShape": [
+        32,
+        384
+      ],
+      "outputShape": [
+        32,
+        384
+      ]
+    },
+    {
+      "id": "drop",
+      "type": "dropout",
+      "name": "drop",
+      "position": {
+        "x": 0,
+        "y": 400
+      },
+      "params": {
+        "p": 0.1
+      },
+      "inputs": [
+        "add"
+      ],
+      "outputs": [
+        "blocks_0_ln1",
+        "add_2"
+      ],
+      "inputShape": [
+        32,
+        384
+      ],
+      "outputShape": [
+        32,
+        384
+      ]
+    },
+    {
+      "id": "blocks_0_ln1",
+      "type": "layerNorm",
+      "name": "blocks.0.ln1",
+      "position": {
+        "x": 0,
+        "y": 500
+      },
+      "params": {
+        "normalizedShape": 384
+      },
+      "inputs": [
+        "drop"
+      ],
+      "outputs": [
+        "blocks_0_attn"
+      ],
+      "scope": "blocks.0",
+      "inputShape": [
+        32,
+        384
+      ],
+      "outputShape": [
+        32,
+        384
+      ]
+    },
+    {
+      "id": "blocks_0_attn",
+      "type": "multiHeadAttention",
+      "name": "blocks.0.attn",
+      "position": {
+        "x": 0,
+        "y": 600
+      },
+      "params": {
+        "hiddenDim": 384,
+        "numHeads": 6
+      },
+      "inputs": [
+        "blocks_0_ln1"
+      ],
+      "outputs": [
+        "add_2"
+      ],
+      "scope": "blocks.0",
+      "inputShape": [
+        32,
+        384
+      ],
+      "outputShape": [
+        32,
+        384
+      ]
+    },
+    {
+      "id": "add_2",
+      "type": "add",
+      "name": "add_2",
+      "position": {
+        "x": 0,
+        "y": 700
+      },
+      "params": {},
+      "inputs": [
+        "drop",
+        "blocks_0_attn"
+      ],
+      "outputs": [
+        "blocks_0_ln2",
+        "add_3"
+      ],
+      "scope": "blocks.0",
+      "inputShape": [
+        32,
+        384
+      ],
+      "outputShape": [
+        32,
+        384
+      ]
+    },
+    {
+      "id": "blocks_0_ln2",
+      "type": "layerNorm",
+      "name": "blocks.0.ln2",
+      "position": {
+        "x": 0,
+        "y": 800
+      },
+      "params": {
+        "normalizedShape": 384
+      },
+      "inputs": [
+        "add_2"
+      ],
+      "outputs": [
+        "blocks_0_mlp_0"
+      ],
+      "scope": "blocks.0",
+      "inputShape": [
+        32,
+        384
+      ],
+      "outputShape": [
+        32,
+        384
+      ]
+    },
+    {
+      "id": "blocks_0_mlp_0",
+      "type": "linear",
+      "name": "blocks.0.mlp.0",
+      "position": {
+        "x": 0,
+        "y": 900
+      },
+      "params": {
+        "inFeatures": 384,
+        "outFeatures": 1536
+      },
+      "inputs": [
+        "blocks_0_ln2"
+      ],
+      "outputs": [
+        "blocks_0_mlp_1"
+      ],
+      "scope": "blocks.0.mlp",
+      "inputShape": [
+        32,
+        384
+      ],
+      "outputShape": [
+        32,
+        1536
+      ]
+    },
+    {
+      "id": "blocks_0_mlp_1",
+      "type": "gelu",
+      "name": "blocks.0.mlp.1",
+      "position": {
+        "x": 0,
+        "y": 1000
+      },
+      "params": {},
+      "inputs": [
+        "blocks_0_mlp_0"
+      ],
+      "outputs": [
+        "blocks_0_mlp_2"
+      ],
+      "scope": "blocks.0.mlp",
+      "inputShape": [
+        32,
+        1536
+      ],
+      "outputShape": [
+        32,
+        1536
+      ]
+    },
+    {
+      "id": "blocks_0_mlp_2",
+      "type": "linear",
+      "name": "blocks.0.mlp.2",
+      "position": {
+        "x": 0,
+        "y": 1100
+      },
+      "params": {
+        "inFeatures": 1536,
+        "outFeatures": 384
+      },
+      "inputs": [
+        "blocks_0_mlp_1"
+      ],
+      "outputs": [
+        "blocks_0_mlp_3"
+      ],
+      "scope": "blocks.0.mlp",
+      "inputShape": [
+        32,
+        1536
+      ],
+      "outputShape": [
+        32,
+        384
+      ]
+    },
+    {
+      "id": "blocks_0_mlp_3",
+      "type": "dropout",
+      "name": "blocks.0.mlp.3",
+      "position": {
+        "x": 0,
+        "y": 1200
+      },
+      "params": {
+        "p": 0.1
+      },
+      "inputs": [
+        "blocks_0_mlp_2"
+      ],
+      "outputs": [
+        "add_3"
+      ],
+      "scope": "blocks.0.mlp",
+      "inputShape": [
+        32,
+        384
+      ],
+      "outputShape": [
+        32,
+        384
+      ]
+    },
+    {
+      "id": "add_3",
+      "type": "add",
+      "name": "add_3",
+      "position": {
+        "x": 0,
+        "y": 1300
+      },
+      "params": {},
+      "inputs": [
+        "add_2",
+        "blocks_0_mlp_3"
+      ],
+      "outputs": [
+        "blocks_1_ln1",
+        "add_4"
+      ],
+      "scope": "blocks.1",
+      "inputShape": [
+        32,
+        384
+      ],
+      "outputShape": [
+        32,
+        384
+      ]
+    },
+    {
+      "id": "blocks_1_ln1",
+      "type": "layerNorm",
+      "name": "blocks.1.ln1",
+      "position": {
+        "x": 0,
+        "y": 1400
+      },
+      "params": {
+        "normalizedShape": 384
+      },
+      "inputs": [
+        "add_3"
+      ],
+      "outputs": [
+        "blocks_1_attn"
+      ],
+      "scope": "blocks.1",
+      "inputShape": [
+        32,
+        384
+      ],
+      "outputShape": [
+        32,
+        384
+      ]
+    },
+    {
+      "id": "blocks_1_attn",
+      "type": "multiHeadAttention",
+      "name": "blocks.1.attn",
+      "position": {
+        "x": 0,
+        "y": 1500
+      },
+      "params": {
+        "hiddenDim": 384,
+        "numHeads": 6
+      },
+      "inputs": [
+        "blocks_1_ln1"
+      ],
+      "outputs": [
+        "add_4"
+      ],
+      "scope": "blocks.1",
+      "inputShape": [
+        32,
+        384
+      ],
+      "outputShape": [
+        32,
+        384
+      ]
+    },
+    {
+      "id": "add_4",
+      "type": "add",
+      "name": "add_4",
+      "position": {
+        "x": 0,
+        "y": 1600
+      },
+      "params": {},
+      "inputs": [
+        "add_3",
+        "blocks_1_attn"
+      ],
+      "outputs": [
+        "blocks_1_ln2",
+        "add_5"
+      ],
+      "scope": "blocks.1",
+      "inputShape": [
+        32,
+        384
+      ],
+      "outputShape": [
+        32,
+        384
+      ]
+    },
+    {
+      "id": "blocks_1_ln2",
+      "type": "layerNorm",
+      "name": "blocks.1.ln2",
+      "position": {
+        "x": 0,
+        "y": 1700
+      },
+      "params": {
+        "normalizedShape": 384
+      },
+      "inputs": [
+        "add_4"
+      ],
+      "outputs": [
+        "blocks_1_mlp_0"
+      ],
+      "scope": "blocks.1",
+      "inputShape": [
+        32,
+        384
+      ],
+      "outputShape": [
+        32,
+        384
+      ]
+    },
+    {
+      "id": "blocks_1_mlp_0",
+      "type": "linear",
+      "name": "blocks.1.mlp.0",
+      "position": {
+        "x": 0,
+        "y": 1800
+      },
+      "params": {
+        "inFeatures": 384,
+        "outFeatures": 1536
+      },
+      "inputs": [
+        "blocks_1_ln2"
+      ],
+      "outputs": [
+        "blocks_1_mlp_1"
+      ],
+      "scope": "blocks.1.mlp",
+      "inputShape": [
+        32,
+        384
+      ],
+      "outputShape": [
+        32,
+        1536
+      ]
+    },
+    {
+      "id": "blocks_1_mlp_1",
+      "type": "gelu",
+      "name": "blocks.1.mlp.1",
+      "position": {
+        "x": 0,
+        "y": 1900
+      },
+      "params": {},
+      "inputs": [
+        "blocks_1_mlp_0"
+      ],
+      "outputs": [
+        "blocks_1_mlp_2"
+      ],
+      "scope": "blocks.1.mlp",
+      "inputShape": [
+        32,
+        1536
+      ],
+      "outputShape": [
+        32,
+        1536
+      ]
+    },
+    {
+      "id": "blocks_1_mlp_2",
+      "type": "linear",
+      "name": "blocks.1.mlp.2",
+      "position": {
+        "x": 0,
+        "y": 2000
+      },
+      "params": {
+        "inFeatures": 1536,
+        "outFeatures": 384
+      },
+      "inputs": [
+        "blocks_1_mlp_1"
+      ],
+      "outputs": [
+        "blocks_1_mlp_3"
+      ],
+      "scope": "blocks.1.mlp",
+      "inputShape": [
+        32,
+        1536
+      ],
+      "outputShape": [
+        32,
+        384
+      ]
+    },
+    {
+      "id": "blocks_1_mlp_3",
+      "type": "dropout",
+      "name": "blocks.1.mlp.3",
+      "position": {
+        "x": 0,
+        "y": 2100
+      },
+      "params": {
+        "p": 0.1
+      },
+      "inputs": [
+        "blocks_1_mlp_2"
+      ],
+      "outputs": [
+        "add_5"
+      ],
+      "scope": "blocks.1.mlp",
+      "inputShape": [
+        32,
+        384
+      ],
+      "outputShape": [
+        32,
+        384
+      ]
+    },
+    {
+      "id": "add_5",
+      "type": "add",
+      "name": "add_5",
+      "position": {
+        "x": 0,
+        "y": 2200
+      },
+      "params": {},
+      "inputs": [
+        "add_4",
+        "blocks_1_mlp_3"
+      ],
+      "outputs": [
+        "blocks_2_ln1",
+        "add_6"
+      ],
+      "scope": "blocks.2",
+      "inputShape": [
+        32,
+        384
+      ],
+      "outputShape": [
+        32,
+        384
+      ]
+    },
+    {
+      "id": "blocks_2_ln1",
+      "type": "layerNorm",
+      "name": "blocks.2.ln1",
+      "position": {
+        "x": 0,
+        "y": 2300
+      },
+      "params": {
+        "normalizedShape": 384
+      },
+      "inputs": [
+        "add_5"
+      ],
+      "outputs": [
+        "blocks_2_attn"
+      ],
+      "scope": "blocks.2",
+      "inputShape": [
+        32,
+        384
+      ],
+      "outputShape": [
+        32,
+        384
+      ]
+    },
+    {
+      "id": "blocks_2_attn",
+      "type": "multiHeadAttention",
+      "name": "blocks.2.attn",
+      "position": {
+        "x": 0,
+        "y": 2400
+      },
+      "params": {
+        "hiddenDim": 384,
+        "numHeads": 6
+      },
+      "inputs": [
+        "blocks_2_ln1"
+      ],
+      "outputs": [
+        "add_6"
+      ],
+      "scope": "blocks.2",
+      "inputShape": [
+        32,
+        384
+      ],
+      "outputShape": [
+        32,
+        384
+      ]
+    },
+    {
+      "id": "add_6",
+      "type": "add",
+      "name": "add_6",
+      "position": {
+        "x": 0,
+        "y": 2500
+      },
+      "params": {},
+      "inputs": [
+        "add_5",
+        "blocks_2_attn"
+      ],
+      "outputs": [
+        "blocks_2_ln2",
+        "add_7"
+      ],
+      "scope": "blocks.2",
+      "inputShape": [
+        32,
+        384
+      ],
+      "outputShape": [
+        32,
+        384
+      ]
+    },
+    {
+      "id": "blocks_2_ln2",
+      "type": "layerNorm",
+      "name": "blocks.2.ln2",
+      "position": {
+        "x": 0,
+        "y": 2600
+      },
+      "params": {
+        "normalizedShape": 384
+      },
+      "inputs": [
+        "add_6"
+      ],
+      "outputs": [
+        "blocks_2_mlp_0"
+      ],
+      "scope": "blocks.2",
+      "inputShape": [
+        32,
+        384
+      ],
+      "outputShape": [
+        32,
+        384
+      ]
+    },
+    {
+      "id": "blocks_2_mlp_0",
+      "type": "linear",
+      "name": "blocks.2.mlp.0",
+      "position": {
+        "x": 0,
+        "y": 2700
+      },
+      "params": {
+        "inFeatures": 384,
+        "outFeatures": 1536
+      },
+      "inputs": [
+        "blocks_2_ln2"
+      ],
+      "outputs": [
+        "blocks_2_mlp_1"
+      ],
+      "scope": "blocks.2.mlp",
+      "inputShape": [
+        32,
+        384
+      ],
+      "outputShape": [
+        32,
+        1536
+      ]
+    },
+    {
+      "id": "blocks_2_mlp_1",
+      "type": "gelu",
+      "name": "blocks.2.mlp.1",
+      "position": {
+        "x": 0,
+        "y": 2800
+      },
+      "params": {},
+      "inputs": [
+        "blocks_2_mlp_0"
+      ],
+      "outputs": [
+        "blocks_2_mlp_2"
+      ],
+      "scope": "blocks.2.mlp",
+      "inputShape": [
+        32,
+        1536
+      ],
+      "outputShape": [
+        32,
+        1536
+      ]
+    },
+    {
+      "id": "blocks_2_mlp_2",
+      "type": "linear",
+      "name": "blocks.2.mlp.2",
+      "position": {
+        "x": 0,
+        "y": 2900
+      },
+      "params": {
+        "inFeatures": 1536,
+        "outFeatures": 384
+      },
+      "inputs": [
+        "blocks_2_mlp_1"
+      ],
+      "outputs": [
+        "blocks_2_mlp_3"
+      ],
+      "scope": "blocks.2.mlp",
+      "inputShape": [
+        32,
+        1536
+      ],
+      "outputShape": [
+        32,
+        384
+      ]
+    },
+    {
+      "id": "blocks_2_mlp_3",
+      "type": "dropout",
+      "name": "blocks.2.mlp.3",
+      "position": {
+        "x": 0,
+        "y": 3000
+      },
+      "params": {
+        "p": 0.1
+      },
+      "inputs": [
+        "blocks_2_mlp_2"
+      ],
+      "outputs": [
+        "add_7"
+      ],
+      "scope": "blocks.2.mlp",
+      "inputShape": [
+        32,
+        384
+      ],
+      "outputShape": [
+        32,
+        384
+      ]
+    },
+    {
+      "id": "add_7",
+      "type": "add",
+      "name": "add_7",
+      "position": {
+        "x": 0,
+        "y": 3100
+      },
+      "params": {},
+      "inputs": [
+        "add_6",
+        "blocks_2_mlp_3"
+      ],
+      "outputs": [
+        "blocks_3_ln1",
+        "add_8"
+      ],
+      "scope": "blocks.3",
+      "inputShape": [
+        32,
+        384
+      ],
+      "outputShape": [
+        32,
+        384
+      ]
+    },
+    {
+      "id": "blocks_3_ln1",
+      "type": "layerNorm",
+      "name": "blocks.3.ln1",
+      "position": {
+        "x": 0,
+        "y": 3200
+      },
+      "params": {
+        "normalizedShape": 384
+      },
+      "inputs": [
+        "add_7"
+      ],
+      "outputs": [
+        "blocks_3_attn"
+      ],
+      "scope": "blocks.3",
+      "inputShape": [
+        32,
+        384
+      ],
+      "outputShape": [
+        32,
+        384
+      ]
+    },
+    {
+      "id": "blocks_3_attn",
+      "type": "multiHeadAttention",
+      "name": "blocks.3.attn",
+      "position": {
+        "x": 0,
+        "y": 3300
+      },
+      "params": {
+        "hiddenDim": 384,
+        "numHeads": 6
+      },
+      "inputs": [
+        "blocks_3_ln1"
+      ],
+      "outputs": [
+        "add_8"
+      ],
+      "scope": "blocks.3",
+      "inputShape": [
+        32,
+        384
+      ],
+      "outputShape": [
+        32,
+        384
+      ]
+    },
+    {
+      "id": "add_8",
+      "type": "add",
+      "name": "add_8",
+      "position": {
+        "x": 0,
+        "y": 3400
+      },
+      "params": {},
+      "inputs": [
+        "add_7",
+        "blocks_3_attn"
+      ],
+      "outputs": [
+        "blocks_3_ln2",
+        "add_9"
+      ],
+      "scope": "blocks.3",
+      "inputShape": [
+        32,
+        384
+      ],
+      "outputShape": [
+        32,
+        384
+      ]
+    },
+    {
+      "id": "blocks_3_ln2",
+      "type": "layerNorm",
+      "name": "blocks.3.ln2",
+      "position": {
+        "x": 0,
+        "y": 3500
+      },
+      "params": {
+        "normalizedShape": 384
+      },
+      "inputs": [
+        "add_8"
+      ],
+      "outputs": [
+        "blocks_3_mlp_0"
+      ],
+      "scope": "blocks.3",
+      "inputShape": [
+        32,
+        384
+      ],
+      "outputShape": [
+        32,
+        384
+      ]
+    },
+    {
+      "id": "blocks_3_mlp_0",
+      "type": "linear",
+      "name": "blocks.3.mlp.0",
+      "position": {
+        "x": 0,
+        "y": 3600
+      },
+      "params": {
+        "inFeatures": 384,
+        "outFeatures": 1536
+      },
+      "inputs": [
+        "blocks_3_ln2"
+      ],
+      "outputs": [
+        "blocks_3_mlp_1"
+      ],
+      "scope": "blocks.3.mlp",
+      "inputShape": [
+        32,
+        384
+      ],
+      "outputShape": [
+        32,
+        1536
+      ]
+    },
+    {
+      "id": "blocks_3_mlp_1",
+      "type": "gelu",
+      "name": "blocks.3.mlp.1",
+      "position": {
+        "x": 0,
+        "y": 3700
+      },
+      "params": {},
+      "inputs": [
+        "blocks_3_mlp_0"
+      ],
+      "outputs": [
+        "blocks_3_mlp_2"
+      ],
+      "scope": "blocks.3.mlp",
+      "inputShape": [
+        32,
+        1536
+      ],
+      "outputShape": [
+        32,
+        1536
+      ]
+    },
+    {
+      "id": "blocks_3_mlp_2",
+      "type": "linear",
+      "name": "blocks.3.mlp.2",
+      "position": {
+        "x": 0,
+        "y": 3800
+      },
+      "params": {
+        "inFeatures": 1536,
+        "outFeatures": 384
+      },
+      "inputs": [
+        "blocks_3_mlp_1"
+      ],
+      "outputs": [
+        "blocks_3_mlp_3"
+      ],
+      "scope": "blocks.3.mlp",
+      "inputShape": [
+        32,
+        1536
+      ],
+      "outputShape": [
+        32,
+        384
+      ]
+    },
+    {
+      "id": "blocks_3_mlp_3",
+      "type": "dropout",
+      "name": "blocks.3.mlp.3",
+      "position": {
+        "x": 0,
+        "y": 3900
+      },
+      "params": {
+        "p": 0.1
+      },
+      "inputs": [
+        "blocks_3_mlp_2"
+      ],
+      "outputs": [
+        "add_9"
+      ],
+      "scope": "blocks.3.mlp",
+      "inputShape": [
+        32,
+        384
+      ],
+      "outputShape": [
+        32,
+        384
+      ]
+    },
+    {
+      "id": "add_9",
+      "type": "add",
+      "name": "add_9",
+      "position": {
+        "x": 0,
+        "y": 4000
+      },
+      "params": {},
+      "inputs": [
+        "add_8",
+        "blocks_3_mlp_3"
+      ],
+      "outputs": [
+        "ln_f"
+      ],
+      "inputShape": [
+        32,
+        384
+      ],
+      "outputShape": [
+        32,
+        384
+      ]
+    },
+    {
+      "id": "ln_f",
+      "type": "layerNorm",
+      "name": "ln_f",
+      "position": {
+        "x": 0,
+        "y": 4100
+      },
+      "params": {
+        "normalizedShape": 384
+      },
+      "inputs": [
+        "add_9"
+      ],
+      "outputs": [
+        "head"
+      ],
+      "inputShape": [
+        32,
+        384
+      ],
+      "outputShape": [
+        32,
+        384
+      ]
+    },
+    {
+      "id": "head",
+      "type": "linear",
+      "name": "head",
+      "position": {
+        "x": 0,
+        "y": 4200
+      },
+      "params": {
+        "inFeatures": 384,
+        "outFeatures": 8192,
+        "bias": false
+      },
+      "inputs": [
+        "ln_f"
+      ],
+      "outputs": [
+        "output"
+      ],
+      "inputShape": [
+        32,
+        384
+      ],
+      "outputShape": [
+        32,
+        8192
+      ]
+    },
+    {
+      "id": "output",
+      "type": "output",
+      "name": "output",
+      "position": {
+        "x": 0,
+        "y": 4300
+      },
+      "params": {},
+      "inputs": [
+        "head"
+      ],
+      "outputs": [],
+      "inputShape": [
+        32,
+        8192
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "e0",
+      "from": "input",
+      "to": "tok_emb",
+      "fromPort": "bottom",
+      "toPort": "top"
+    },
+    {
+      "id": "e1",
+      "from": "input",
+      "to": "pos_emb",
+      "fromPort": "bottom",
+      "toPort": "top"
+    },
+    {
+      "id": "e2",
+      "from": "tok_emb",
+      "to": "add",
+      "fromPort": "bottom",
+      "toPort": "top"
+    },
+    {
+      "id": "e3",
+      "from": "pos_emb",
+      "to": "add",
+      "fromPort": "bottom",
+      "toPort": "top"
+    },
+    {
+      "id": "e4",
+      "from": "add",
+      "to": "drop",
+      "fromPort": "bottom",
+      "toPort": "top"
+    },
+    {
+      "id": "e5",
+      "from": "drop",
+      "to": "blocks_0_ln1",
+      "fromPort": "bottom",
+      "toPort": "top"
+    },
+    {
+      "id": "e6",
+      "from": "blocks_0_ln1",
+      "to": "blocks_0_attn",
+      "fromPort": "bottom",
+      "toPort": "top"
+    },
+    {
+      "id": "e7",
+      "from": "drop",
+      "to": "add_2",
+      "fromPort": "bottom",
+      "toPort": "top"
+    },
+    {
+      "id": "e8",
+      "from": "blocks_0_attn",
+      "to": "add_2",
+      "fromPort": "bottom",
+      "toPort": "top"
+    },
+    {
+      "id": "e9",
+      "from": "add_2",
+      "to": "blocks_0_ln2",
+      "fromPort": "bottom",
+      "toPort": "top"
+    },
+    {
+      "id": "e10",
+      "from": "blocks_0_ln2",
+      "to": "blocks_0_mlp_0",
+      "fromPort": "bottom",
+      "toPort": "top"
+    },
+    {
+      "id": "e11",
+      "from": "blocks_0_mlp_0",
+      "to": "blocks_0_mlp_1",
+      "fromPort": "bottom",
+      "toPort": "top"
+    },
+    {
+      "id": "e12",
+      "from": "blocks_0_mlp_1",
+      "to": "blocks_0_mlp_2",
+      "fromPort": "bottom",
+      "toPort": "top"
+    },
+    {
+      "id": "e13",
+      "from": "blocks_0_mlp_2",
+      "to": "blocks_0_mlp_3",
+      "fromPort": "bottom",
+      "toPort": "top"
+    },
+    {
+      "id": "e14",
+      "from": "add_2",
+      "to": "add_3",
+      "fromPort": "bottom",
+      "toPort": "top"
+    },
+    {
+      "id": "e15",
+      "from": "blocks_0_mlp_3",
+      "to": "add_3",
+      "fromPort": "bottom",
+      "toPort": "top"
+    },
+    {
+      "id": "e16",
+      "from": "add_3",
+      "to": "blocks_1_ln1",
+      "fromPort": "bottom",
+      "toPort": "top"
+    },
+    {
+      "id": "e17",
+      "from": "blocks_1_ln1",
+      "to": "blocks_1_attn",
+      "fromPort": "bottom",
+      "toPort": "top"
+    },
+    {
+      "id": "e18",
+      "from": "add_3",
+      "to": "add_4",
+      "fromPort": "bottom",
+      "toPort": "top"
+    },
+    {
+      "id": "e19",
+      "from": "blocks_1_attn",
+      "to": "add_4",
+      "fromPort": "bottom",
+      "toPort": "top"
+    },
+    {
+      "id": "e20",
+      "from": "add_4",
+      "to": "blocks_1_ln2",
+      "fromPort": "bottom",
+      "toPort": "top"
+    },
+    {
+      "id": "e21",
+      "from": "blocks_1_ln2",
+      "to": "blocks_1_mlp_0",
+      "fromPort": "bottom",
+      "toPort": "top"
+    },
+    {
+      "id": "e22",
+      "from": "blocks_1_mlp_0",
+      "to": "blocks_1_mlp_1",
+      "fromPort": "bottom",
+      "toPort": "top"
+    },
+    {
+      "id": "e23",
+      "from": "blocks_1_mlp_1",
+      "to": "blocks_1_mlp_2",
+      "fromPort": "bottom",
+      "toPort": "top"
+    },
+    {
+      "id": "e24",
+      "from": "blocks_1_mlp_2",
+      "to": "blocks_1_mlp_3",
+      "fromPort": "bottom",
+      "toPort": "top"
+    },
+    {
+      "id": "e25",
+      "from": "add_4",
+      "to": "add_5",
+      "fromPort": "bottom",
+      "toPort": "top"
+    },
+    {
+      "id": "e26",
+      "from": "blocks_1_mlp_3",
+      "to": "add_5",
+      "fromPort": "bottom",
+      "toPort": "top"
+    },
+    {
+      "id": "e27",
+      "from": "add_5",
+      "to": "blocks_2_ln1",
+      "fromPort": "bottom",
+      "toPort": "top"
+    },
+    {
+      "id": "e28",
+      "from": "blocks_2_ln1",
+      "to": "blocks_2_attn",
+      "fromPort": "bottom",
+      "toPort": "top"
+    },
+    {
+      "id": "e29",
+      "from": "add_5",
+      "to": "add_6",
+      "fromPort": "bottom",
+      "toPort": "top"
+    },
+    {
+      "id": "e30",
+      "from": "blocks_2_attn",
+      "to": "add_6",
+      "fromPort": "bottom",
+      "toPort": "top"
+    },
+    {
+      "id": "e31",
+      "from": "add_6",
+      "to": "blocks_2_ln2",
+      "fromPort": "bottom",
+      "toPort": "top"
+    },
+    {
+      "id": "e32",
+      "from": "blocks_2_ln2",
+      "to": "blocks_2_mlp_0",
+      "fromPort": "bottom",
+      "toPort": "top"
+    },
+    {
+      "id": "e33",
+      "from": "blocks_2_mlp_0",
+      "to": "blocks_2_mlp_1",
+      "fromPort": "bottom",
+      "toPort": "top"
+    },
+    {
+      "id": "e34",
+      "from": "blocks_2_mlp_1",
+      "to": "blocks_2_mlp_2",
+      "fromPort": "bottom",
+      "toPort": "top"
+    },
+    {
+      "id": "e35",
+      "from": "blocks_2_mlp_2",
+      "to": "blocks_2_mlp_3",
+      "fromPort": "bottom",
+      "toPort": "top"
+    },
+    {
+      "id": "e36",
+      "from": "add_6",
+      "to": "add_7",
+      "fromPort": "bottom",
+      "toPort": "top"
+    },
+    {
+      "id": "e37",
+      "from": "blocks_2_mlp_3",
+      "to": "add_7",
+      "fromPort": "bottom",
+      "toPort": "top"
+    },
+    {
+      "id": "e38",
+      "from": "add_7",
+      "to": "blocks_3_ln1",
+      "fromPort": "bottom",
+      "toPort": "top"
+    },
+    {
+      "id": "e39",
+      "from": "blocks_3_ln1",
+      "to": "blocks_3_attn",
+      "fromPort": "bottom",
+      "toPort": "top"
+    },
+    {
+      "id": "e40",
+      "from": "add_7",
+      "to": "add_8",
+      "fromPort": "bottom",
+      "toPort": "top"
+    },
+    {
+      "id": "e41",
+      "from": "blocks_3_attn",
+      "to": "add_8",
+      "fromPort": "bottom",
+      "toPort": "top"
+    },
+    {
+      "id": "e42",
+      "from": "add_8",
+      "to": "blocks_3_ln2",
+      "fromPort": "bottom",
+      "toPort": "top"
+    },
+    {
+      "id": "e43",
+      "from": "blocks_3_ln2",
+      "to": "blocks_3_mlp_0",
+      "fromPort": "bottom",
+      "toPort": "top"
+    },
+    {
+      "id": "e44",
+      "from": "blocks_3_mlp_0",
+      "to": "blocks_3_mlp_1",
+      "fromPort": "bottom",
+      "toPort": "top"
+    },
+    {
+      "id": "e45",
+      "from": "blocks_3_mlp_1",
+      "to": "blocks_3_mlp_2",
+      "fromPort": "bottom",
+      "toPort": "top"
+    },
+    {
+      "id": "e46",
+      "from": "blocks_3_mlp_2",
+      "to": "blocks_3_mlp_3",
+      "fromPort": "bottom",
+      "toPort": "top"
+    },
+    {
+      "id": "e47",
+      "from": "add_8",
+      "to": "add_9",
+      "fromPort": "bottom",
+      "toPort": "top"
+    },
+    {
+      "id": "e48",
+      "from": "blocks_3_mlp_3",
+      "to": "add_9",
+      "fromPort": "bottom",
+      "toPort": "top"
+    },
+    {
+      "id": "e49",
+      "from": "add_9",
+      "to": "ln_f",
+      "fromPort": "bottom",
+      "toPort": "top"
+    },
+    {
+      "id": "e50",
+      "from": "ln_f",
+      "to": "head",
+      "fromPort": "bottom",
+      "toPort": "top"
+    },
+    {
+      "id": "e51",
+      "from": "head",
+      "to": "output",
+      "fromPort": "bottom",
+      "toPort": "top"
+    }
+  ]
+}

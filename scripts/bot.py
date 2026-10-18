@@ -27,6 +27,7 @@ from typing import Any, Dict, List, Optional, Tuple
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import fix as fixmod  # noqa: E402
 import init as initmod  # noqa: E402
+import job as jobmod  # noqa: E402
 import plan_request  # noqa: E402
 import policy_lines  # noqa: E402
 import report  # noqa: E402
@@ -93,7 +94,37 @@ def parse_models(config: Dict[str, Any]) -> List[Dict[str, Any]]:
             "depth": m.get("depth"),
             "name": m.get("name"),
             "policy": m.get("policy") if isinstance(m.get("policy"), dict) else None,
+            "job": m.get("job") if isinstance(m.get("job"), dict) else None,
         })
+    return out
+
+
+def read_base_jobs(workspace: str, base_sha: str, config_rel: str) -> Dict[str, Optional[Dict[str, Any]]]:
+    """Each model's `job:` as the base commit's config wrote it, keyed by target.
+
+    Read with `git show` rather than from the base worktree, because affected-model detection
+    needs it before that worktree exists: a pull request that only raises `job.batch` touches no
+    model file and is still a change to what the job reserves.
+    """
+    r = git(["show", "%s:%s" % (base_sha, config_rel.replace(os.sep, "/"))], workspace)
+    if r.returncode != 0 or not r.stdout.strip():
+        return {}
+    try:
+        import yaml  # type: ignore
+        data = yaml.safe_load(r.stdout)
+    except ImportError:
+        try:
+            data = json.loads(r.stdout)
+        except ValueError:
+            return {}
+    except Exception:  # noqa: BLE001  (a base config that does not parse is not this PR's problem)
+        return {}
+    if not isinstance(data, dict) or not isinstance(data.get("models"), list):
+        return {}
+    out: Dict[str, Optional[Dict[str, Any]]] = {}
+    for m in data["models"]:
+        if isinstance(m, dict) and isinstance(m.get("path"), str):
+            out[m["path"]] = jobmod.parse_job(data, m)
     return out
 
 
@@ -116,12 +147,16 @@ def parse_policy(config: Dict[str, Any], model: Dict[str, Any]) -> Optional[Dict
 
 
 def is_affected(model: Dict[str, Any], changed: List[str], listed_files: Optional[List[str]] = None) -> bool:
-    """A listed file changed, or anything under its directory did (a helper module it imports).
+    """A listed file changed, or anything under its directory did (a helper module it imports),
+    or a file the model's job reads its batch or sequence length from did.
 
     A sibling that is itself a listed model does not count as a helper: editing `models/cnn.py`
     is a change to the CNN entry, not to every model that shares the folder.
     """
     file = model["file"]
+    job_files = set(model.get("job_files") or [])
+    if job_files and any(os.path.normpath(c) in job_files for c in changed):
+        return True
     directory = os.path.dirname(file)
     others = set(os.path.normpath(f) for f in (listed_files or []) if os.path.normpath(f) != file)
     for c in changed:
@@ -241,7 +276,9 @@ def slug(target: str) -> str:
 def process_model(model: Dict[str, Any], workspace: str, base_dir: Optional[str], tmp: str,
                   pr: Optional[int], api_key: Optional[str],
                   policy: Optional[Dict[str, Any]] = None,
-                  out_root: Optional[str] = None) -> Dict[str, Any]:
+                  out_root: Optional[str] = None,
+                  job: Optional[Dict[str, Any]] = None,
+                  base_job: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     entry: Dict[str, Any] = {"target": model["target"], "input": model["input"], "status": "planned",
                              "blockers": 0, "warnings": 0, "legal": True}
     out_dir = os.path.join(out_root or os.path.join(tmp, "neurarch-bot"), slug(model["target"]))
@@ -261,6 +298,7 @@ def process_model(model: Dict[str, Any], workspace: str, base_dir: Optional[str]
         return entry
 
     base_graph = None
+    base_path = None
     if base_dir is not None:
         if os.path.isfile(os.path.join(base_dir, model["file"])):
             base_path = os.path.join(out_dir, "base.neurarch.json")
@@ -270,6 +308,7 @@ def process_model(model: Dict[str, Any], workspace: str, base_dir: Optional[str]
                 with open(base_path, "r", encoding="utf-8") as f:
                     base_graph = json.load(f)
             else:
+                base_path = None
                 entry["base_note"] = "The base version did not trace, so there is no diff: %s" % (
                     bmsg.splitlines()[-1] if bmsg else "unknown error")
         else:
@@ -304,7 +343,44 @@ def process_model(model: Dict[str, Any], workspace: str, base_dir: Optional[str]
         "legal": not plan_request.has_blocker(plan),
     })
     print(response.get("text", ""), flush=True)
+    if job is not None:
+        attach_sizing(entry, head_path, base_path if base_graph is not None else None, job, base_job,
+                      workspace, base_dir, out_dir)
     return entry
+
+
+def attach_sizing(entry: Dict[str, Any], head_path: str, base_path: Optional[str],
+                  job: Dict[str, Any], base_job: Optional[Dict[str, Any]], workspace: str,
+                  base_dir: Optional[str], out_dir: str) -> None:
+    """Size the job at its own batch, sequence length and card, on both sides of the change.
+
+    The job spec is resolved at each commit separately: a `file:key` reference reads the
+    training config as it was at the base and as it is at the head, which is what makes a
+    pull request that only raises the batch show the move.
+    """
+    resolved, problems = jobmod.resolve_job(job, workspace)
+    base_resolved = None
+    if base_path:
+        base_resolved, _ = jobmod.resolve_job(base_job if base_job is not None else job, base_dir or workspace)
+        # A key the base config cannot supply is sized at the head's value, so the delta is
+        # the model's change and not a missing number.
+        for k, v in resolved.items():
+            base_resolved.setdefault(k, v)
+        base_resolved.pop("_sources", None)
+    history = (((entry.get("plan") or {}).get("history") or {}).get("rows")) or []
+    sizing = jobmod.size_job(head_path, base_path, resolved, base_resolved, history, out_dir)
+    entry["job"] = resolved
+    entry["job_problems"] = problems
+    entry["sizing"] = sizing
+    if sizing.get("ok"):
+        head = sizing.get("head") or {}
+        log("sized %s: peak %.1f GB at batch %s%s on %s: %s" % (
+            entry["target"], float(head.get("peakGb") or 0), head.get("batch"),
+            " x %s tokens" % head["seqLen"] if head.get("seqLen") else "",
+            (sizing.get("card") or {}).get("name") or "no reserved card",
+            {True: "fits", False: "does NOT fit", None: "no verdict"}[jobmod.fits(sizing)]))
+    else:
+        log("could not size %s: %s" % (entry["target"], sizing.get("error")))
 
 
 def attach_rule_locations(entries: List[Dict[str, Any]], config_path: str, config_rel: str,
@@ -344,6 +420,8 @@ def is_clean(entry: Dict[str, Any]) -> bool:
     diff = (entry.get("plan") or {}).get("diff")
     if not isinstance(diff, dict):
         return False
+    if jobmod.memory_moved(entry.get("sizing")):
+        return False
     return (diff.get("added", 0) + diff.get("removed", 0) + diff.get("changed", 0)) == 0 \
         and not diff.get("lines")
 
@@ -364,6 +442,18 @@ def summary_row(entry: Dict[str, Any]) -> Dict[str, Any]:
             row["costDeltaUsd"] = diff.get("costDeltaUsd")
             row["blastRadius"] = diff.get("blastRadius")
             row["legalityChanged"] = diff.get("legalityChanged")
+    sizing = entry.get("sizing")
+    if isinstance(sizing, dict) and sizing.get("ok"):
+        head = sizing.get("head") or {}
+        row["peakGb"] = round(float(head.get("peakGb") or 0), 2)
+        row["batch"] = head.get("batch")
+        row["seqLen"] = head.get("seqLen")
+        row["reservedGpu"] = (sizing.get("card") or {}).get("name")
+        row["fitsReserved"] = jobmod.fits(sizing)
+        row["maxBatch"] = head.get("maxBatch")
+        row["smallestFitGpu"] = head.get("smallestFitGpu")
+        if isinstance(sizing.get("base"), dict):
+            row["peakDeltaGb"] = round(float(head.get("peakGb") or 0) - float(sizing["base"].get("peakGb") or 0), 2)
     if entry.get("error"):
         row["error"] = entry["error"].splitlines()[-1] if entry["error"] else None
     if entry.get("paths"):
@@ -1258,6 +1348,10 @@ def main() -> int:
     config_path = os.path.join(workspace, os.environ.get("INPUT_CONFIG") or ".neurarch.yml")
     api_key = (os.environ.get("INPUT_API_KEY") or "").strip() or None
     fail_on_warn = env_flag("INPUT_FAIL_ON_WARN")
+    # On unless switched off: a job that no longer fits the card it reserves is the check's
+    # first job, so an empty input (an older workflow, a local run) means "fail on it".
+    fail_on_no_fit = (os.environ.get("INPUT_FAIL_ON_NO_FIT") or "true").strip().lower() not in (
+        "0", "false", "no", "off")
     comment_on_clean = env_flag("INPUT_COMMENT_ON_CLEAN")
     comment_path = os.path.join(tmp, "neurarch-bot-comment.md")
 
@@ -1318,6 +1412,9 @@ https://github.com/neurarch-ai/neurarch-bot/blob/main/examples/.neurarch.yml
 
     models = parse_models(config)
     policies = {m["target"]: parse_policy(config, m) for m in models}
+    jobs = {m["target"]: jobmod.parse_job(config, m) for m in models}
+    for m in models:
+        m["job_files"] = jobmod.job_files(jobs[m["target"]])
     for target, pol in policies.items():
         if pol:
             log("policy for %s: %s" % (target, json.dumps(pol, sort_keys=True)))
@@ -1332,7 +1429,11 @@ https://github.com/neurarch-ai/neurarch-bot/blob/main/examples/.neurarch.yml
         changed = changed_files(workspace, base_sha, head_sha)
         log("%d changed file(s) in PR #%s" % (len(changed), pr))
     listed_files = [m["file"] for m in models]
-    affected = [m for m in models if is_affected(m, changed, listed_files)]
+    config_rel = os.path.normpath(os.environ.get("INPUT_CONFIG") or ".neurarch.yml")
+    base_jobs = read_base_jobs(workspace, base_sha, config_rel) if base_sha else {}
+    affected = [m for m in models if is_affected(m, changed, listed_files)
+                or (config_rel in [os.path.normpath(c) for c in changed]
+                    and m["target"] in base_jobs and base_jobs[m["target"]] != jobs[m["target"]])]
     log("%d of %d listed model(s) affected: %s" % (len(affected), len(models),
                                                    ", ".join(m["target"] for m in affected) or "none"))
 
@@ -1351,7 +1452,9 @@ https://github.com/neurarch-ai/neurarch-bot/blob/main/examples/.neurarch.yml
     try:
         for m in affected:
             entries.append(process_model(m, workspace, base_dir, tmp, pr, api_key,
-                                         policy=policies.get(m["target"])))
+                                         policy=policies.get(m["target"]),
+                                         job=jobs.get(m["target"]) or {},
+                                         base_job=base_jobs.get(m["target"])))
     finally:
         remove_worktree(workspace, base_dir)
     attach_rule_locations(entries, config_path, os.environ.get("INPUT_CONFIG") or ".neurarch.yml",
@@ -1360,7 +1463,11 @@ https://github.com/neurarch-ai/neurarch-bot/blob/main/examples/.neurarch.yml
     blockers = sum(e["blockers"] for e in entries)
     warnings = sum(e["warnings"] for e in entries)
     legal = all(e["legal"] for e in entries)
-    fail = (not legal) or (fail_on_warn and warnings > 0)
+    no_fit = [e["target"] for e in entries if jobmod.fits(e.get("sizing")) is False]
+    if no_fit:
+        log("%d model(s) do not fit the card their job reserves: %s%s" % (
+            len(no_fit), ", ".join(no_fit), "" if fail_on_no_fit else " (fail-on-no-fit is off)"))
+    fail = jobmod.should_fail(entries, fail_on_warn, fail_on_no_fit)
     all_clean = all(is_clean(e) for e in entries)
     comment_mode = "create_or_update"
     if all_clean and not comment_on_clean:
@@ -1390,6 +1497,7 @@ https://github.com/neurarch-ai/neurarch-bot/blob/main/examples/.neurarch.yml
         "warnings": str(warnings),
         "plans-json": json.dumps([summary_row(e) for e in entries], separators=(",", ":")),
         "fail": "true" if fail else "false",
+        "fits": "false" if no_fit else ("true" if any(jobmod.fits(e.get("sizing")) for e in entries) else ""),
         "comment": comment_mode,
         "comment-path": comment_path,
         "affected": str(len(entries)),

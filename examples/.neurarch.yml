@@ -44,6 +44,30 @@ models:
     policy:                              # this model's own rules, merged over the block below
       max_params: 50M                    # key by key, so one tighter line does not drop the rest
 
+  # The job: what the training run reserves. The comment opens with the peak at THIS batch and
+  # sequence length against THIS card, and the check fails when a change stops it fitting
+  # (Action input `fail-on-no-fit`, default true). Each value is a number or a `file:key`
+  # reference into your own training config, read at the commit being planned, so a pull
+  # request that only raises `batch_size` there is planned like a model change.
+  - path: models/doc_lm.py:DocLM
+    input: "1,32:long"                   # traced short; seq_len below is what is sized
+    job:
+      gpu: A10G                          # T4, L4, A10G, L40S, A100 40GB, A100 80GB, H100
+      batch: configs/pretrain.yaml:batch_size
+      seq_len: configs/pretrain.yaml:seq_len
+      grad_accum: configs/pretrain.yaml:grad_accum   # printed as the effective batch
+      epochs: 3                          # for the cost line; default 10
+      samples: 400000                    # for the cost line; default 50,000, labelled assumed
+      # attention: sdpa                  # sdpa (default), flash or eager; eager stores scores
+
+
+# ---------------------------------------------------------------------------- job (default)
+#
+# A top-level `job:` applies to every model, and a model's own `job:` merges over it key by key.
+# job:
+#   gpu: A10G
+#   batch: 32
+
 
 # ---------------------------------------------------------------------------- policy
 #

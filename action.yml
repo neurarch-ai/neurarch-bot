@@ -1,5 +1,5 @@
 name: 'neurarch-bot'
-description: 'The Neurarch agent for model repos: every model change gets a plan on the pull request (params, cost, GPU fit, will it run) and a blocker turns the check red, a weekly report issue on every model you own, and `/neurarch train` in a comment runs one on a real GPU and posts the curve back.'
+description: 'The Neurarch agent for model repos: every model change gets a plan on the pull request that leads with the training peak at the job''s own batch against the card it reserves (the largest batch that fits, the smallest card that holds it, the cost), and a job that no longer fits its card or a structural blocker turns the check red, a weekly report issue on every model you own, and `/neurarch train` in a comment runs one on a real GPU and posts the curve back.'
 author: 'neurarch-ai'
 branding:
   icon: 'git-pull-request'
@@ -34,6 +34,10 @@ inputs:
     description: 'Train mode only. Minutes to keep polling the run and updating the comment. When it runs out the comment says the run is still going and how to poll it; the run itself is not cancelled and the job stays green.'
     required: false
     default: '20'
+  fail-on-no-fit:
+    description: 'Set to "false" to keep the check green when a model no longer fits the card its job reserves (`job.gpu` in the config). Default "true": the training peak at the job''s own batch and sequence length is the first thing the comment says, and a job that will not fit its card fails the check like a blocker does.'
+    required: false
+    default: 'true'
   fail-on-warn:
     description: 'Set to "true" to fail the check on warnings, not just blockers.'
     required: false
@@ -61,6 +65,9 @@ outputs:
   warnings:
     description: 'Total warnings across affected models.'
     value: ${{ steps.bot.outputs.warnings }}
+  fits:
+    description: '"false" when any affected model''s training peak does not fit the card its job reserves, "true" when every sized model fits, empty when no job names a card.'
+    value: ${{ steps.bot.outputs.fits }}
   plans-json:
     description: 'JSON array, one row per affected model: target, input, status, legal, blockers, warnings, summary, params, cost, and the deltas when a base was traced.'
     value: ${{ steps.bot.outputs.plans-json }}
@@ -187,6 +194,7 @@ runs:
         INPUT_CONFIG: ${{ inputs.config }}
         INPUT_API_KEY: ${{ inputs.api-key }}
         INPUT_FAIL_ON_WARN: ${{ inputs.fail-on-warn }}
+        INPUT_FAIL_ON_NO_FIT: ${{ inputs.fail-on-no-fit }}
         INPUT_COMMENT_ON_CLEAN: ${{ inputs.comment-on-clean }}
         INPUT_GITHUB_TOKEN: ${{ inputs.github-token }}
         INPUT_TIMEOUT_MIN: ${{ inputs.timeout-min }}
@@ -287,5 +295,5 @@ runs:
       if: steps.bot.outputs.fail == 'true'
       shell: bash
       run: |
-        echo "neurarch-bot: ${{ steps.bot.outputs.blockers }} blocker(s), ${{ steps.bot.outputs.warnings }} warning(s); failing the job."
+        echo "neurarch-bot: ${{ steps.bot.outputs.blockers }} blocker(s), ${{ steps.bot.outputs.warnings }} warning(s), fits reserved card: '${{ steps.bot.outputs.fits }}'; failing the job."
         exit 1

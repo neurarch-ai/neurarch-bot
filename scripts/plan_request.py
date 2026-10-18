@@ -14,9 +14,10 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import urlsplit
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import job  # noqa: E402
 import policy_lines  # noqa: E402
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 DEFAULT_API = "https://www.neurarch.com"
 PLAN_PATH = "/api/v1/plan"
@@ -163,20 +164,103 @@ def _badge(entry: Dict[str, Any]) -> str:
     return ":warning: no plan"
 
 
+def _fmt_params(n: Any) -> str:
+    if not isinstance(n, (int, float)):
+        return "?"
+    n = float(n)
+    for div, suffix in ((1e9, "B"), (1e6, "M"), (1e3, "K")):
+        if abs(n) >= div:
+            return "%.1f%s" % (n / div, suffix)
+    return "%d" % int(n)
+
+
+def _finding_line(f: Dict[str, Any], with_fix: bool = True) -> str:
+    line = "- %s" % (f.get("title") or "finding")
+    if f.get("detail"):
+        line += ": %s" % f["detail"]
+    if with_fix and f.get("fix"):
+        line += " Fix: %s" % f["fix"]
+    return line
+
+
+def render_structural(plan: Dict[str, Any]) -> List[str]:
+    """The second block: will it run, what blocks or warns, the house rules, what changed.
+
+    Rendered from the plan JSON (the public contract of `/api/v1/plan`) rather than from the
+    server's markdown, because that markdown opens with a memory table sized at the server's
+    default batch, which would sit under the job's own number and disagree with it.
+    """
+    run = plan.get("run") or {}
+    model = plan.get("model") or {}
+    diff = plan.get("diff") if isinstance(plan.get("diff"), dict) else None
+    blockers = [f for f in run.get("blockers") or [] if isinstance(f, dict)]
+    warnings = [f for f in run.get("warnings") or [] if isinstance(f, dict)]
+    legal = run.get("legal")
+    if legal is None:
+        verdict = "**cannot say**: %s" % (run.get("withheld") or "the read was incomplete")
+    elif legal and not blockers:
+        verdict = "yes, %d warning%s" % (len(warnings), "" if len(warnings) == 1 else "s")
+    else:
+        verdict = "**no**, %d blocker%s" % (len(blockers), "" if len(blockers) == 1 else "s")
+    if diff and diff.get("legalityChanged") == "became_illegal":
+        verdict += " (**base ran, this does not**)"
+    elif diff and diff.get("legalityChanged") == "became_legal":
+        verdict += " (base did not run, this does)"
+    params = "%s params" % _fmt_params(model.get("params"))
+    if diff and isinstance(diff.get("paramsDelta"), (int, float)):
+        d = diff["paramsDelta"]
+        params += " (%s vs base)" % ("no change" if d == 0 else "%s%s" % ("+" if d > 0 else "-", _fmt_params(abs(d))))
+    out = ["**Structural checks.** Will it run: %s. %s layers, %s." % (
+        verdict, model.get("layers", "?"), params)]
+    if blockers:
+        out += ["", "**Blockers**"] + [_finding_line(f) for f in blockers[:6]]
+        if len(blockers) > 6:
+            out.append("- and %d more" % (len(blockers) - 6))
+    if warnings:
+        out += ["", "**Warnings**"] + [_finding_line(f, with_fix=False) for f in warnings[:6]]
+        if len(warnings) > 6:
+            out.append("- and %d more" % (len(warnings) - 6))
+    if (plan.get("policy") or {}).get("applied"):
+        lines = [f for f in blockers + warnings if f.get("stage") == "policy"]
+        out += ["", "**Policy**"]
+        out += ["- %s" % f.get("title") + (" (`%s`)" % f["detail"] if f.get("detail") else "")
+                for f in lines[:8]] or ["- every policy line passes"]
+    if diff and diff.get("lines"):
+        lines = list(diff["lines"])
+        out += ["", "**Changes vs %s** (+%s -%s ~%s, %s downstream layer%s)" % (
+            (diff.get("base") or {}).get("name", "base"), diff.get("added", 0), diff.get("removed", 0),
+            diff.get("changed", 0), diff.get("blastRadius", 0), "" if diff.get("blastRadius") == 1 else "s"),
+            "```"] + lines[:12] + (["... %d more" % (len(lines) - 12)] if len(lines) > 12 else []) + ["```"]
+    return out
+
+
 def render_entry(entry: Dict[str, Any]) -> str:
-    """One model's section: heading, bold summary, then the server's markdown (or the fallback)."""
+    """One model's section: heading, memory against the reserved card, then the structural checks."""
     target = entry.get("target", "?")
-    out = ["### `%s` %s" % (target, _badge(entry)), ""]
     status = entry.get("status")
+    head_badge = _badge(entry)
+    mem_badge = job.badge(entry.get("sizing")) if status == "planned" else None
+    out = ["### `%s` %s" % (target, "%s · %s" % (mem_badge, head_badge) if mem_badge else head_badge), ""]
     if status == "planned":
         plan = entry.get("plan") or {}
-        summary = plan.get("summary") or "plan for %s" % target
-        out.append("**%s**" % summary)
-        out.append("")
         if entry.get("base_note"):
             out.append("_%s_" % entry["base_note"])
             out.append("")
-        out.append(_strip_leading_summary(entry.get("markdown", ""), summary).rstrip())
+        lead = job.render_lead(entry.get("sizing"), entry.get("job"), entry.get("job_problems"))
+        if lead and (entry.get("sizing") or {}).get("ok"):
+            out.extend(lead)
+            out.append("")
+            out.extend(render_structural(plan))
+        else:
+            # No sizing on this runner: the server's own plan, as before, under whatever
+            # line says why the memory block is missing.
+            if lead:
+                out.extend(lead)
+                out.append("")
+            summary = plan.get("summary") or "plan for %s" % target
+            out.append("**%s**" % summary)
+            out.append("")
+            out.append(_strip_leading_summary(entry.get("markdown", ""), summary).rstrip())
         # The findings name the rule; this names the line somebody wrote it on. A policy
         # blocker with nowhere to go reads as our opinion rather than as the repository's.
         section = policy_lines.render_section(entry.get("rule_lines") or [])
@@ -217,8 +301,14 @@ def assemble_comment(entries: List[Dict[str, Any]], version: str = __version__,
         parts.append(render_entry(entry))
         parts.append("")
     footer = ("<sub>neurarch-bot v%s. The traced graph (layer structure and shapes, never weights or data) "
-              "was sent to %s to compute this plan; nothing is shared publicly. "
-              "[How it works](%s)" % (version, api_host(api_base()), BOT_URL))
+              "was sent to %s for the structural checks; nothing is shared publicly. "
+              % (version, api_host(api_base())))
+    if any((e.get("sizing") or {}).get("ok") for e in entries):
+        vendored = job.bundle_version()
+        footer += ("Memory, batch and cost are estimates (AdamW, bf16 autocast) computed on the runner "
+                   "by the plan bundle vendored in neurarch-bot%s. "
+                   % (", neurarch `%s`" % vendored[:7] if vendored else ""))
+    footer += "[How it works](%s)" % BOT_URL
     if run_url:
         footer += " · [run log](%s)" % run_url
     footer += "</sub>"

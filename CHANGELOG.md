@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.0
+
+- **The comment leads with memory against the card the job reserves.** The first block of each model's section is the training peak at the job's own batch and sequence length, whether it fits the card the job reserves, the move versus the base ("+17.8 GB, no longer fits A10G 24 GB"), the largest batch that fits that card (with the micro-batch and accumulation steps that keep the effective batch), the smallest card that holds it, the cost, and the history line when the key has one. The structural checks (will it run, blockers, warnings, policy, the per-field diff) are the second block.
+- **New `job:` key in `.neurarch.yml`**, per model or top level: `gpu`, `batch`, `seq_len`, `grad_accum`, `epochs`, `samples`, `attention`. Each value is a number or a `file:key` reference into the repository's own training config, read at the commit being planned on both sides of the pull request; a change to that file alone now plans the model.
+- **A job that no longer fits its reserved card fails the check.** New input `fail-on-no-fit` (default `true`) and output `fits`. A structural blocker still fails it either way.
+- **The arithmetic is vendored, not reimplemented.** `scripts/vendor/modelPlan.bundle.mjs` is neurarch's `lib/modelPlan.bundle.mjs` (the same file `/api/v1/plan` and neurarch-mcp run); `scripts/size_job.mjs` calls its `buildPlan` and `maxBatchFor` on the traced graph, on the runner. `/api/v1/plan` takes no batch or card, so the hosted memory table (sized at batch 32) is no longer printed under the job's own number. When node is missing or sizing fails, the section falls back to the hosted plan and says why.
+
 ## 0.5.2
 
 ### Fixed
